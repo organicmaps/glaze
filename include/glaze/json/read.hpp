@@ -15,7 +15,9 @@
 #include "glaze/core/opts.hpp"
 #include "glaze/core/read.hpp"
 #include "glaze/core/reflect.hpp"
+#if !TARGET_OS_IOS
 #include "glaze/file/file_ops.hpp"
+#endif
 #include "glaze/json/json_concepts.hpp"
 #include "glaze/json/skip.hpp"
 #include "glaze/util/for_each.hpp"
@@ -1957,7 +1959,7 @@ namespace glz
          }
       }
    };
-
+#if !TARGET_OS_IOS
    template <class T>
    struct from<JSON, includer<T>>
    {
@@ -2002,7 +2004,7 @@ namespace glz
          ctx.current_file = current_file;
       }
    };
-
+#endif
    template <pair_t T>
    struct from<JSON, T>
    {

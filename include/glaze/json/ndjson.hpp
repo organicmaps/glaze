@@ -272,7 +272,7 @@ namespace glz
       }
       return unexpected(ec);
    }
-
+#if !TARGET_OS_IOS
    template <auto Opts = opts{.format = NDJSON}, read_supported<NDJSON> T>
    [[nodiscard]] error_ctx read_file_ndjson(T& value, const sv file_name)
    {
@@ -289,7 +289,7 @@ namespace glz
 
       return read<Opts>(value, buffer, ctx);
    }
-
+#endif
    template <write_supported<NDJSON> T, class Buffer>
    [[nodiscard]] error_ctx write_ndjson(T&& value, Buffer&& buffer)
    {
