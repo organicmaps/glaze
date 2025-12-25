@@ -53,7 +53,7 @@ int main()
    auto ws_server = std::make_shared<websocket_server>();
 
    // Thread-safe storage for connected clients
-   std::set<std::shared_ptr<websocket_connection>> clients;
+   std::set<std::shared_ptr<websocket_connection_interface>> clients;
    std::mutex clients_mutex;
 
    // WebSocket event handlers
@@ -63,7 +63,7 @@ int main()
       return true; // Accept all connections for this example
    });
 
-   ws_server->on_open([&clients, &clients_mutex](std::shared_ptr<websocket_connection> conn, const request&) {
+   ws_server->on_open([&clients, &clients_mutex](auto conn, const request&) {
       std::lock_guard<std::mutex> lock(clients_mutex);
       clients.insert(conn);
 
@@ -82,8 +82,7 @@ int main()
       }
    });
 
-   ws_server->on_message([&clients, &clients_mutex](std::shared_ptr<websocket_connection> conn,
-                                                    std::string_view message, ws_opcode opcode) {
+   ws_server->on_message([&clients, &clients_mutex](auto conn, std::string_view message, ws_opcode opcode) {
       std::cout << "💬 Message from " << conn->remote_address() << ": " << message << std::endl;
 
       if (opcode == ws_opcode::text) {
@@ -121,12 +120,15 @@ int main()
       }
    });
 
-   ws_server->on_close([&clients, &clients_mutex](std::shared_ptr<websocket_connection> conn) {
+   ws_server->on_close([&clients, &clients_mutex](auto conn, ws_close_code code, std::string_view reason) {
       std::lock_guard<std::mutex> lock(clients_mutex);
       clients.erase(conn);
 
-      std::cout << "❌ WebSocket closed: " << conn->remote_address() << " (Remaining clients: " << clients.size() << ")"
-                << std::endl;
+      std::cout << "❌ WebSocket closed: " << conn->remote_address() << " (code=" << static_cast<int>(code);
+      if (!reason.empty()) {
+         std::cout << ", reason=" << reason;
+      }
+      std::cout << ", remaining clients: " << clients.size() << ")" << std::endl;
 
       // Notify remaining clients
       std::string leave_msg = "User from " + conn->remote_address() + " left the chat";
@@ -135,7 +137,7 @@ int main()
       }
    });
 
-   ws_server->on_error([](std::shared_ptr<websocket_connection> conn, std::error_code ec) {
+   ws_server->on_error([](auto conn, std::error_code ec) {
       std::cout << "🚨 WebSocket error for " << conn->remote_address() << ": " << ec.message() << std::endl;
    });
 

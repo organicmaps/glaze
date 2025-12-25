@@ -4,7 +4,7 @@ include(cmake/prelude.cmake)
 
 project(
     glaze
-    VERSION 5.6.1
+    VERSION 6.4.0
     LANGUAGES CXX
 )
 
@@ -35,7 +35,9 @@ if (MSVC)
     endif()
    endif()
 else()
-  target_compile_options(${PROJECT_NAME}_${PROJECT_NAME} INTERFACE "-Wno-missing-braces")
+  # Only apply -Wno-missing-braces for C and C++ compilation to avoid breaking ISPC and other language builds
+  target_compile_options(${PROJECT_NAME}_${PROJECT_NAME} INTERFACE
+    $<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:-Wno-missing-braces>)
 endif()
 
 set_property(TARGET ${PROJECT_NAME}_${PROJECT_NAME} PROPERTY EXPORT_NAME glaze)
@@ -93,8 +95,3 @@ if(glaze_ENABLE_SSL)
   target_compile_definitions(glaze_glaze INTERFACE GLZ_ENABLE_SSL)
 endif(glaze_ENABLE_SSL)
 
-option(glaze_BUILD_INTEROP "Build language interoperability library" OFF)
-
-if(glaze_BUILD_INTEROP)
-  add_subdirectory(src/interop)
-endif()

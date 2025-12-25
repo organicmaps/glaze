@@ -47,7 +47,7 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -67,7 +67,7 @@ inline void should_fail()
          expect(glz::read_json(obj, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -79,7 +79,7 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -91,7 +91,7 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -103,7 +103,7 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -141,7 +141,7 @@ inline void should_fail()
          expect(glz::read_json(obj, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -153,7 +153,7 @@ inline void should_fail()
          expect(glz::read_json(obj, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -165,7 +165,7 @@ inline void should_fail()
          expect(glz::read_json(obj, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -177,7 +177,7 @@ inline void should_fail()
          expect(glz::read_json(obj, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -189,8 +189,81 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
+      }
+   };
+
+   "illegal control code short tail"_test = [] {
+      constexpr sv s = "[\"ab\r\nd\"]";
+      {
+         std::vector<std::string> v;
+         expect(glz::read_json(v, s));
+      }
+      {
+         glz::generic obj{};
+         expect(glz::read_json(obj, s));
+      }
+   };
+
+   "illegal control code middle tail"_test = [] {
+      constexpr sv s = "[\"ab\r\nd\",\"ab\"]";
+      {
+         std::vector<std::string> v;
+         expect(glz::read_json(v, s));
+      }
+      {
+         glz::generic obj{};
+         expect(glz::read_json(obj, s));
+      }
+   };
+
+   "illegal control code long tail"_test = [] {
+      constexpr sv s = "[\"ab\r\nd\",\"abcdefghji\"]";
+      {
+         std::vector<std::string> v;
+         expect(glz::read_json(v, s));
+      }
+      {
+         glz::generic obj{};
+         expect(glz::read_json(obj, s));
+      }
+   };
+
+   "illegal control code u8string short tail"_test = [] {
+      constexpr sv s = "[\"ab\r\nd\"]";
+      {
+         std::vector<std::u8string> v;
+         expect(glz::read_json(v, s));
+      }
+   };
+
+   "illegal control code u8string middle tail"_test = [] {
+      constexpr sv s = "[\"ab\r\nd\",\"ab\"]";
+      {
+         std::vector<std::u8string> v;
+         expect(glz::read_json(v, s));
+      }
+   };
+
+   "illegal control code u8string long tail"_test = [] {
+      constexpr sv s = "[\"ab\r\nd\",\"abcdefghji\"]";
+      {
+         std::vector<std::u8string> v;
+         expect(glz::read_json(v, s));
+      }
+   };
+
+   "illegal control code non-null-terminated"_test = [] {
+      std::string input = "\"a\rb\"";
+      std::string_view s{input.data(), input.size()};
+      {
+         std::string v;
+         expect(glz::read<glz::opts{.null_terminated = false}>(v, s));
+      }
+      {
+         std::u8string v;
+         expect(glz::read<glz::opts{.null_terminated = false}>(v, s));
       }
    };
 
@@ -201,7 +274,7 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -213,7 +286,7 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -225,7 +298,7 @@ inline void should_fail()
          expect(glz::read_json(obj, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -237,7 +310,7 @@ inline void should_fail()
          expect(glz::read_json(obj, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -257,7 +330,7 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -269,7 +342,7 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };
@@ -281,7 +354,7 @@ inline void should_fail()
          expect(glz::read_json(v, s));
       }
       {
-         glz::json_t obj{};
+         glz::generic obj{};
          expect(glz::read_json(obj, s));
       }
    };

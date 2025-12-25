@@ -65,7 +65,7 @@ namespace glz
             }
          }
 
-         if constexpr (Opts.bools_as_numbers) {
+         if constexpr (check_bools_as_numbers(Opts)) {
             if (value) {
                std::memcpy(&b[ix], "1", 1);
             }
@@ -105,20 +105,6 @@ namespace glz
          }
       }
    };
-
-   constexpr std::array<uint16_t, 256> char_escape_table = [] {
-      auto combine = [](const char chars[2]) -> uint16_t { return uint16_t(chars[0]) | (uint16_t(chars[1]) << 8); };
-
-      std::array<uint16_t, 256> t{};
-      t['\b'] = combine(R"(\b)");
-      t['\t'] = combine(R"(\t)");
-      t['\n'] = combine(R"(\n)");
-      t['\f'] = combine(R"(\f)");
-      t['\r'] = combine(R"(\r)");
-      t['\"'] = combine(R"(\")");
-      t['\\'] = combine(R"(\\)");
-      return t;
-   }();
 
    template <class T>
       requires str_t<T> || char_t<T>
@@ -166,7 +152,7 @@ namespace glz
                      return value ? value : "";
                   }
                   else {
-                     return value;
+                     return sv{value};
                   }
                }();
 
@@ -194,10 +180,10 @@ namespace glz
                      return value ? value : "";
                   }
                   else if constexpr (array_char_t<T>) {
-                     return *value.data() ? sv{value.data()} : "";
+                     return sv{value.data(), value.size()};
                   }
                   else {
-                     return value;
+                     return sv{value};
                   }
                }();
                const auto n = str.size();
@@ -228,6 +214,9 @@ namespace glz
                         std::memcpy(data, c, 8);
                         uint64_t swar;
                         std::memcpy(&swar, c, 8);
+                        if constexpr (std::endian::native == std::endian::big) {
+                           swar = std::byteswap(swar);
+                        }
 
                         constexpr uint64_t lo7_mask = repeat_byte8(0b01111111);
                         const uint64_t lo7 = swar & lo7_mask;
@@ -322,7 +311,8 @@ namespace glz
          for_each<N>([&]<size_t I>() {
             using val_t = field_t<T, I>;
 
-            if constexpr (always_skipped<val_t>)
+            constexpr bool write_member_functions = check_write_member_functions(Options);
+            if constexpr (always_skipped<val_t> || (!write_member_functions && is_member_function_pointer<val_t>))
                return;
             else {
                if constexpr (null_t<val_t>) {

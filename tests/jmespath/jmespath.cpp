@@ -205,4 +205,66 @@ suite gcc_maybe_uninitialized_tests = [] {
    };
 };
 
+suite fuzz_findings_tests = [] {
+   "out_of_bounds_read"_test = [] {
+      Person child{};
+      std::vector<char> path(1, '\xff');
+      std::vector<char> buffer{0x7b, 0x22, 0x22, 0x22, 0x22};
+      static constexpr glz::opts options{.null_terminated = false};
+      [[maybe_unused]] auto result = glz::read_jmespath<options>(std::string_view(path.data(), path.size()), child,
+                                                                 std::string_view(buffer.data(), buffer.size()));
+   };
+
+   "unterminated_object_member"_test = [] {
+      Person child{};
+      const std::vector<char> path{char(0x00), char(0x43), char(0x7c), char(0x94),
+                                   char(0x7c), char(0x00), char(0x2b), char(0x7f)};
+      const std::vector<char> buffer{char(0x7b), char(0x22), char(0x00), char(0x22),
+                                     char(0x22), char(0x22), char(0x2c)};
+      static constexpr glz::opts options{.null_terminated = false};
+      auto result = glz::read_jmespath<options>(std::string_view(path.data(), path.size()), child,
+                                                std::string_view(buffer.data(), buffer.size()));
+      expect(result == glz::error_code::unexpected_end);
+   };
+};
+
+suite tuple_slice_tests = [] {
+   "mixed_type_array_tuple_deserialization_correct_slice"_test = [] {
+      std::string buffer = R"([1,"a","b",{"c":1}])";
+      std::tuple<int, std::string> target;
+
+      // Using [0:2] to get [1, "a"] which matches tuple<int, string>
+      auto ec = glz::read_jmespath<"[0:2]">(target, buffer);
+      expect(not ec) << "Error code: " << int(ec) << " " << glz::format_error(ec, buffer);
+      expect(std::get<0>(target) == 1);
+      expect(std::get<1>(target) == "a");
+   };
+
+   "mixed_type_array_tuple_deserialization_user_slice"_test = [] {
+      std::string buffer = R"([1,"a","b",{"c":1}])";
+      std::tuple<int, std::string> target;
+
+      // User used [0:1], which produces [1].
+      // This results in partial fill of the tuple.
+      auto ec = glz::read_jmespath<"[0:1]">(target, buffer);
+      expect(not ec) << "Error code: " << int(ec) << " " << glz::format_error(ec, buffer);
+      expect(std::get<0>(target) == 1);
+      expect(std::get<1>(target) == ""); // Default constructed string
+   };
+
+   "mixed_type_array_glz_tuple_deserialization"_test = [] {
+      std::string buffer = R"([1,"a","b",{"c":1}])";
+      glz::tuple<int, std::string> target;
+
+      static_assert(glz::tuple_t<decltype(target)>, "glz::tuple should satisfy tuple_t");
+      static_assert(glz::is_std_tuple<std::tuple<int, std::string>>, "std::tuple should satisfy is_std_tuple");
+
+      auto ec = glz::read_jmespath<"[0:2]">(target, buffer);
+      expect(not ec) << "Error code: " << int(ec) << " " << glz::format_error(ec, buffer);
+
+      expect(glz::get<0>(target) == 1);
+      expect(glz::get<1>(target) == "a");
+   };
+};
+
 int main() { return 0; }

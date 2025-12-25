@@ -3,7 +3,39 @@
 
 #pragma once
 
+// Detect constexpr std::string support
+// The old GCC ABI (_GLIBCXX_USE_CXX11_ABI=0) does not have constexpr std::string::size()
+// This affects features like rename_key returning std::string
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI == 0
+#define GLZ_HAS_CONSTEXPR_STRING 0
+#else
+#define GLZ_HAS_CONSTEXPR_STRING 1
+#endif
+
+namespace glz
+{
+   // Constexpr bool for use in if constexpr or other compile-time contexts
+   // Use GLZ_HAS_CONSTEXPR_STRING macro for #if preprocessor guards
+   inline constexpr bool has_constexpr_string = GLZ_HAS_CONSTEXPR_STRING;
+}
+
 // Glaze Feature Test Macros for breaking changes
+
+// v6.2.0 moves append_arrays and error_on_const_read out of glz::opts
+// Use a custom opts struct inheriting from glz::opts to enable these options
+#define glaze_v6_2_0_opts_append_arrays
+#define glaze_v6_2_0_opts_error_on_const_read
+
+// v6.2.0 changes std::array<char, N> serialization to respect array bounds instead of scanning for null terminator
+// This fixes a potential buffer overflow when arrays lack null terminators
+// Use const char* for null-terminated C-style string semantics
+#define glaze_v6_2_0_array_char_bounds
+
+// v6.1.0 removes bools_as_numbers from default glz::opts
+#define glaze_v6_1_0_bools_as_numbers_opt
+
+// v6.0.0 renames json/json_t.hpp to json/generic.hpp and deprecates glz::json_t alias
+#define glaze_v6_0_0_generic_header
 
 // v5.2.0 Moves `layout` CSV option into glz::opts_csv
 #define glaze_v5_2_0_opts_csv

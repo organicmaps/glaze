@@ -2,6 +2,8 @@
 
 This guide covers advanced Glaze HTTP features including CORS support, WebSocket functionality, SSL/TLS encryption, and HTTP client capabilities.
 
+> **Prerequisites:** All networking features require ASIO. See the [ASIO Setup Guide](asio-setup.md) for installation instructions.
+
 ## CORS (Cross-Origin Resource Sharing)
 
 ### Quick CORS Setup
@@ -15,8 +17,9 @@ glz::http_server server;
 server.enable_cors();
 
 // Good for development, allows all origins and methods
-server.bind(8080);
+server.bind(8080).with_signals();
 server.start();
+server.wait_for_signal(); // Block until Ctrl+C
 ```
 
 ### Production CORS Configuration
@@ -34,12 +37,15 @@ server.enable_cors(allowed_origins, true); // Allow credentials
 // Or use detailed configuration
 glz::cors_config config;
 config.allowed_origins = {"https://myapp.com", "https://app.myapp.com"};
+config.allowed_origins_validator = [](std::string_view origin) {
+    return origin.ends_with(".partner.myapp.com");
+};
 config.allowed_methods = {"GET", "POST", "PUT", "DELETE"};
 config.allowed_headers = {"Content-Type", "Authorization", "X-API-Key"};
 config.exposed_headers = {"X-Total-Count", "X-Page-Info"};
 config.allow_credentials = true;
 config.max_age = 3600; // 1 hour preflight cache
-config.handle_preflight = true;
+config.options_success_status = 200; // Use legacy-friendly 200 instead of 204
 
 server.enable_cors(config);
 ```
@@ -50,6 +56,9 @@ server.enable_cors(config);
 // Create custom CORS handler
 auto custom_cors = glz::create_cors_middleware({
     .allowed_origins = {"https://trusted-site.com"},
+    .allowed_origins_validator = [](std::string_view origin) {
+        return origin.ends_with(".trusted-site.com");
+    },
     .allowed_methods = {"GET", "POST"},
     .allowed_headers = {"Content-Type", "Authorization"},
     .allow_credentials = true,
@@ -71,6 +80,15 @@ server.get("/test-cors", [](const glz::request& req, glz::response& res) {
     });
 });
 ```
+
+### Automatic Preflight Handling
+
+The server builds the `Allow` header dynamically, and runs middleware (including CORS) before returning a response. If the origin is denied the preflight receives `403`; if the browser asks for a verb that is not implemented the server answers with `405` (after running middleware so diagnostics still flow); otherwise the CORS middleware fills in the appropriate `Access-Control-Allow-*` headers.
+
+### Extended CORS Configuration
+
+- **Dynamic origins** – `allowed_origins_validator` let you accept wildcard domains or perform per-request checks.
+- **Custom preflight status** – override `options_success_status` if a client expects `200` instead of `204`.
 
 ## WebSocket Support
 
@@ -112,8 +130,9 @@ ws_server->on_error([](std::shared_ptr<glz::websocket_connection> conn, std::err
 glz::http_server server;
 server.websocket("/ws", ws_server);
 
-server.bind(8080);
+server.bind(8080).with_signals();
 server.start();
+server.wait_for_signal();
 ```
 
 ### Chat Room Example
@@ -228,8 +247,9 @@ server.get("/secure-data", [](const glz::request& req, glz::response& res) {
     });
 });
 
-server.bind(8443); // Standard HTTPS port
+server.bind(8443).with_signals(); // Standard HTTPS port
 server.start();
+server.wait_for_signal();
 ```
 
 ---
@@ -245,33 +265,102 @@ void run_dual_servers() {
     http_server.get("/redirect", [](const glz::request& req, glz::response& res) {
         res.status(301).header("Location", "https://localhost:8443" + req.target);
     });
-    
+
     // HTTPS server
     glz::https_server https_server;
     https_server.load_certificate("cert.pem", "key.pem");
     setup_secure_routes(https_server);
-    
+
     // Start both servers
     auto http_future = std::async([&]() {
         http_server.bind(8080);
         http_server.start();
     });
-    
+
     auto https_future = std::async([&]() {
         https_server.bind(8443);
         https_server.start();
     });
-    
+
     // Wait for shutdown signal
     wait_for_shutdown();
-    
+
     http_server.stop();
     https_server.stop();
-    
+
     http_future.wait();
     https_future.wait();
 }
 ```
+
+### Multiple Servers with Shared io_context
+
+You can run multiple servers on the same io_context for better resource efficiency:
+
+```cpp
+#include "glaze/net/http_server.hpp"
+#include <asio/io_context.hpp>
+#include <memory>
+#include <thread>
+
+void run_multiple_servers_shared_context() {
+    // Create a shared io_context
+    auto io_ctx = std::make_shared<asio::io_context>();
+
+    // Create HTTP server on shared context
+    glz::http_server http_server(io_ctx);
+    http_server.get("/api/v1", [](const glz::request&, glz::response& res) {
+        res.json({{"version", "1.0"}});
+    });
+    http_server.bind(8080);
+    http_server.start(0); // Don't create worker threads
+
+    // Create HTTPS server on same shared context
+    glz::https_server https_server(io_ctx);
+    https_server.load_certificate("cert.pem", "key.pem");
+    https_server.get("/api/v2", [](const glz::request&, glz::response& res) {
+        res.json({{"version", "2.0"}, {"secure", true}});
+    });
+    https_server.bind(8443);
+    https_server.start(0); // Don't create worker threads
+
+    // Run the shared io_context in a thread pool
+    std::vector<std::thread> threads;
+    const size_t num_threads = std::thread::hardware_concurrency();
+    threads.reserve(num_threads);
+
+    for (size_t i = 0; i < num_threads; ++i) {
+        threads.emplace_back([io_ctx]() {
+            io_ctx->run();
+        });
+    }
+
+    std::cout << "HTTP server running on port 8080\n";
+    std::cout << "HTTPS server running on port 8443\n";
+    std::cout << "Both servers sharing " << num_threads << " worker threads\n";
+
+    // Wait for shutdown...
+    wait_for_shutdown();
+
+    // Stop both servers and the io_context
+    http_server.stop();
+    https_server.stop();
+    io_ctx->stop();
+
+    // Wait for all threads to finish
+    for (auto& thread : threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+}
+```
+
+This approach is useful when you need to:
+- Run multiple servers (HTTP, HTTPS, WebSocket) on the same thread pool
+- Minimize resource usage by sharing threads between services
+- Centralize io_context management for better control
+- Integrate multiple servers into an existing ASIO-based application
 
 ## HTTP Client
 

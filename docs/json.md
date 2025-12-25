@@ -74,6 +74,14 @@ if (result) {
 }
 ```
 
+**Partial Updates**: When reading into an existing object, `read_json` only updates fields present in the JSON—other fields retain their existing values. This makes `read_json` ideal for applying partial updates:
+
+```cpp
+Person person{.name = "Default", .age = 0, .hobbies = {}};
+glz::read_json(person, R"({"age": 25})");
+// person.name is still "Default", person.age is now 25
+```
+
 ### File I/O
 
 ```cpp
@@ -164,6 +172,12 @@ struct glz::meta<Person> {
 // JSON output: {"full_name":"John","years_old":30,"interests":["reading"]}
 ```
 
+### Member Function Pointers in Metadata
+
+When a `glz::meta` definition references a member function (for example, to expose a computed field), Glaze skips that entry during JSON writes by default. This prevents unintentionally emitting empty values for callables.
+
+If you want the key to be emitted—you can opt back in by supplying a custom options type with `write_member_functions = true`:
+
 ## Error Handling
 
 Glaze provides comprehensive error handling with detailed error messages:
@@ -247,12 +261,16 @@ struct glz::meta<Status> {
     using enum Status;
     static constexpr auto value = glz::enumerate(
         Active,
-        Inactive, 
+        Inactive,
         Pending
     );
 };
 // Now serializes as: "Active", "Inactive", "Pending"
 ```
+
+> [!TIP]
+>
+> For automatic enum-to-string serialization without writing metadata, consider using [simple_enum](https://github.com/arturbac/simple_enum), which provides Glaze integration.
 
 ### Variants
 
@@ -572,3 +590,11 @@ struct strict_opts : glz::opts {
 
 auto ec = glz::read<strict_opts>(obj, json_data);
 ```
+
+## See Also
+
+- [Generic JSON](./generic-json.md) - Working with `glz::generic` for dynamic JSON
+- [JSON Patch (RFC 6902)](./json-patch.md) - Apply structured patches to JSON documents
+- [JSON Merge Patch (RFC 7386)](./json-merge-patch.md) - Apply partial updates to JSON documents
+- [JSON Schema](./json-schema.md) - Generate JSON Schema from C++ types
+- [JSON Pointer Syntax](./json-pointer-syntax.md) - Path syntax for navigating JSON documents
