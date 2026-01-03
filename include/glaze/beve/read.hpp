@@ -578,6 +578,12 @@ namespace glz
             ctx.error = error_code::unexpected_end;
             return;
          }
+         if constexpr (check_max_string_length(Opts) > 0) {
+            if (n > check_max_string_length(Opts)) [[unlikely]] {
+               ctx.error = error_code::invalid_length;
+               return;
+            }
+         }
          value.resize(n);
          std::memcpy(value.data(), it, n);
          it += n;
@@ -606,6 +612,12 @@ namespace glz
          if (uint64_t(end - it) < n) [[unlikely]] {
             ctx.error = error_code::unexpected_end;
             return;
+         }
+         if constexpr (check_max_string_length(Opts) > 0) {
+            if (n > check_max_string_length(Opts)) [[unlikely]] {
+               ctx.error = error_code::invalid_length;
+               return;
+            }
          }
 
          if constexpr (string_view_t<T>) {
@@ -789,6 +801,18 @@ namespace glz
                return;
             }
 
+            const auto num_bytes = (n + 7) / 8;
+            if (uint64_t(end - it) < num_bytes) [[unlikely]] {
+               ctx.error = error_code::invalid_length;
+               return;
+            }
+            if constexpr (check_max_array_size(Opts) > 0) {
+               if (n > check_max_array_size(Opts)) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
+            }
+
             if constexpr (resizable<T>) {
                value.resize(n);
 
@@ -797,7 +821,6 @@ namespace glz
                }
             }
 
-            const auto num_bytes = (value.size() + 7) / 8;
             for (size_t byte_i{}, i{}; byte_i < num_bytes; ++byte_i, ++it) {
                if (invalid_end(ctx, it, end)) {
                   return;
@@ -831,6 +854,12 @@ namespace glz
                if ((it + n * element_size) > end) [[unlikely]] {
                   ctx.error = error_code::unexpected_end;
                   return 0;
+               }
+               if constexpr (check_max_array_size(Opts) > 0) {
+                  if (n > check_max_array_size(Opts)) [[unlikely]] {
+                     ctx.error = error_code::invalid_length;
+                     return 0;
+                  }
                }
 
                if constexpr (resizable<T>) {
@@ -965,6 +994,18 @@ namespace glz
                n = value.size();
             }
 
+            // Each string needs at least 1 byte for length header
+            if (uint64_t(end - it) < n) [[unlikely]] {
+               ctx.error = error_code::invalid_length;
+               return;
+            }
+            if constexpr (check_max_array_size(Opts) > 0) {
+               if (n > check_max_array_size(Opts)) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
+            }
+
             if constexpr (resizable<T>) {
                value.resize(n);
 
@@ -981,6 +1022,12 @@ namespace glz
                if (uint64_t(end - it) < length) [[unlikely]] {
                   ctx.error = error_code::unexpected_end;
                   return;
+               }
+               if constexpr (check_max_string_length(Opts) > 0) {
+                  if (length > check_max_string_length(Opts)) [[unlikely]] {
+                     ctx.error = error_code::invalid_length;
+                     return;
+                  }
                }
 
                x.resize(length);
@@ -1026,6 +1073,12 @@ namespace glz
             if (uint64_t(end - it) < n * sizeof(V)) [[unlikely]] {
                ctx.error = error_code::unexpected_end;
                return;
+            }
+            if constexpr (check_max_array_size(Opts) > 0) {
+               if (n > check_max_array_size(Opts)) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
             }
 
             if constexpr (resizable<T>) {
@@ -1082,6 +1135,18 @@ namespace glz
 
             if constexpr (Opts.partial_read) {
                n = value.size();
+            }
+
+            // Each element needs at least 1 byte for its tag
+            if (uint64_t(end - it) < n) [[unlikely]] {
+               ctx.error = error_code::invalid_length;
+               return;
+            }
+            if constexpr (check_max_array_size(Opts) > 0) {
+               if (n > check_max_array_size(Opts)) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
             }
 
             if constexpr (resizable<T>) {
@@ -1233,6 +1298,21 @@ namespace glz
          if constexpr (Opts.partial_read) {
             n = value.size();
          }
+         else {
+            // Validate count against remaining buffer size (minimum 1 byte per key-value pair)
+            if (n > size_t(end - it)) [[unlikely]] {
+               ctx.error = error_code::unexpected_end;
+               return;
+            }
+
+            // Check user-configured map size limit
+            if constexpr (check_max_map_size(Opts) > 0) {
+               if (n > check_max_map_size(Opts)) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
+            }
+         }
 
          constexpr uint8_t key_tag = beve_key_traits<Key>::key_tag;
 
@@ -1312,6 +1392,9 @@ namespace glz
                   value = std::make_shared<typename T::element_type>();
                else if constexpr (constructible<T>) {
                   value = meta_construct_v<T>();
+               }
+               else if constexpr (check_allocate_raw_pointers(Opts) && std::is_pointer_v<T>) {
+                  value = new std::remove_pointer_t<T>{};
                }
                else {
                   ctx.error = error_code::invalid_nullable_read;
@@ -1731,7 +1814,7 @@ namespace glz
       const auto file_error = file_to_buffer(buffer, ctx.current_file);
 
       if (bool(file_error)) [[unlikely]] {
-         return error_ctx{file_error};
+         return error_ctx{0, file_error};
       }
 
       return read<set_beve<Opts>()>(value, buffer, ctx);
@@ -1844,13 +1927,13 @@ namespace glz
          }
 
          if (bool(ctx.error)) [[unlikely]] {
-            return {ctx.error, ctx.custom_error_message, size_t(it - start), ctx.includer_error};
+            return {size_t(it - start), ctx.error, ctx.custom_error_message};
          }
 
          ++index;
       }
 
-      return {ctx.error, ctx.custom_error_message, size_t(it - start), ctx.includer_error};
+      return {size_t(it - start), ctx.error, ctx.custom_error_message};
    }
 
    // Read multiple delimiter-separated BEVE values, returning the container
@@ -1884,7 +1967,7 @@ namespace glz
       static_assert(sizeof(decltype(*buffer.data())) == 1);
 
       if (offset >= buffer.size()) {
-         return glz::unexpected(error_ctx{error_code::unexpected_end});
+         return glz::unexpected(error_ctx{0, error_code::unexpected_end});
       }
 
       context ctx{};
@@ -1896,13 +1979,13 @@ namespace glz
       skip_beve_delimiter(it, end);
 
       if (it >= end) {
-         return glz::unexpected(error_ctx{error_code::unexpected_end});
+         return glz::unexpected(error_ctx{0, error_code::unexpected_end});
       }
 
       parse<BEVE>::template op<set_beve<Opts>()>(value, ctx, it, end);
 
       if (bool(ctx.error)) [[unlikely]] {
-         return glz::unexpected(error_ctx{ctx.error, ctx.custom_error_message, size_t(it - start), ctx.includer_error});
+         return glz::unexpected(error_ctx{size_t(it - start), ctx.error, ctx.custom_error_message});
       }
 
       return size_t(it - start); // total bytes consumed from offset (delimiter + value)

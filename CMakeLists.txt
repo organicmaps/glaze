@@ -4,7 +4,7 @@ include(cmake/prelude.cmake)
 
 project(
     glaze
-    VERSION 6.4.1
+    VERSION 6.5.0
     LANGUAGES CXX
 )
 
@@ -60,6 +60,12 @@ option(glaze_DISABLE_SIMD_WHEN_SUPPORTED
        "disable SIMD optimizations even when targets support it (e.g. AVX2)" OFF)
 if(glaze_DISABLE_SIMD_WHEN_SUPPORTED)
   target_compile_definitions(glaze_glaze INTERFACE GLZ_DISABLE_SIMD)
+endif()
+
+option(glaze_DISABLE_ALWAYS_INLINE
+       "disable forced inlining to reduce binary size and compilation time" OFF)
+if(glaze_DISABLE_ALWAYS_INLINE)
+  target_compile_definitions(glaze_glaze INTERFACE GLZ_DISABLE_ALWAYS_INLINE)
 endif()
 
 option(glaze_BUILD_EXAMPLES "Build GLAZE examples" OFF)

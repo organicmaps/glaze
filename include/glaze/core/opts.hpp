@@ -201,6 +201,35 @@ namespace glz
    // Skip self_constraint validation during reading. Useful for performance when constraints are known to be valid
    // or when validation should be deferred.
 
+   // ---
+   // bool linear_search = false;
+   // Uses linear key search instead of hash-based lookup for JSON object fields.
+   // This eliminates 256-byte hash tables per struct type, significantly reducing binary size.
+   // Trades O(1) hash lookup for O(N) linear search - faster for small structs (< ~8 fields)
+   // due to cache effects, and much smaller binaries for embedded systems.
+
+   // ---
+   // size_t max_string_length = 0;
+   // Maximum length for string allocations when reading. 0 means no limit (default).
+   // When set, strings exceeding this length will fail with error_code::invalid_length.
+   // Useful for preventing memory exhaustion attacks from malicious input.
+   // Currently applies to BEVE format.
+
+   // ---
+   // size_t max_array_size = 0;
+   // Maximum size for array/vector allocations when reading. 0 means no limit (default).
+   // When set, arrays exceeding this size will fail with error_code::invalid_length.
+   // Useful for preventing memory exhaustion attacks from malicious input.
+   // Currently applies to BEVE format.
+
+   // ---
+   // bool allocate_raw_pointers = false;
+   // When true, allows Glaze to allocate memory for null raw pointers during deserialization using `new`.
+   // By default, Glaze refuses to read into null raw pointers because it would have to call `new`
+   // without any known way to delete the memory, making memory leaks easy.
+   // Enable this option only when you are prepared to manually manage the allocated memory.
+   // Works with JSON, BEVE, CBOR, and MSGPACK formats.
+
    struct append_arrays_opt_tag
    {};
 
@@ -410,6 +439,66 @@ namespace glz
       }
    }
 
+   consteval bool check_assume_sufficient_buffer(auto&& Opts)
+   {
+      if constexpr (requires { Opts.assume_sufficient_buffer; }) {
+         return Opts.assume_sufficient_buffer;
+      }
+      else {
+         return false;
+      }
+   }
+
+   consteval bool check_linear_search(auto&& Opts)
+   {
+      if constexpr (requires { Opts.linear_search; }) {
+         return Opts.linear_search;
+      }
+      else {
+         return false;
+      }
+   }
+
+   consteval size_t check_max_string_length(auto&& Opts)
+   {
+      if constexpr (requires { Opts.max_string_length; }) {
+         return Opts.max_string_length;
+      }
+      else {
+         return 0; // 0 means no limit
+      }
+   }
+
+   consteval size_t check_max_array_size(auto&& Opts)
+   {
+      if constexpr (requires { Opts.max_array_size; }) {
+         return Opts.max_array_size;
+      }
+      else {
+         return 0; // 0 means no limit
+      }
+   }
+
+   consteval size_t check_max_map_size(auto&& Opts)
+   {
+      if constexpr (requires { Opts.max_map_size; }) {
+         return Opts.max_map_size;
+      }
+      else {
+         return 0; // 0 means no limit
+      }
+   }
+
+   consteval bool check_allocate_raw_pointers(auto&& Opts)
+   {
+      if constexpr (requires { Opts.allocate_raw_pointers; }) {
+         return Opts.allocate_raw_pointers;
+      }
+      else {
+         return false;
+      }
+   }
+
    consteval bool check_opening_handled(auto&& o) { return o.internal & uint32_t(opts_internal::opening_handled); }
 
    consteval bool check_closing_handled(auto&& o) { return o.internal & uint32_t(opts_internal::closing_handled); }
@@ -461,12 +550,18 @@ namespace glz
       return ret;
    }
 
+   // Skip ws_handled optimization when minified (skip_ws is a no-op, so the flag is pointless)
    template <auto Opts>
    constexpr auto ws_handled()
    {
-      auto ret = Opts;
-      ret.internal |= uint32_t(opts_internal::ws_handled);
-      return ret;
+      if constexpr (Opts.minified) {
+         return Opts;
+      }
+      else {
+         auto ret = Opts;
+         ret.internal |= uint32_t(opts_internal::ws_handled);
+         return ret;
+      }
    }
 
    template <auto Opts>

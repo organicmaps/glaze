@@ -54,6 +54,12 @@ These options are **not** in `glz::opts` by default. Add them to a custom option
 | `static constexpr std::string_view float_format` | (none) | Format string for float output using `std::format` (C++23) |
 | `bool skip_null_members_on_read` | `false` | Skip null values when reading (preserve existing value) |
 | `bool skip_self_constraint` | `false` | Skip `self_constraint` validation during reading |
+| `bool assume_sufficient_buffer` | `false` | Skip bounds checking for fixed-size buffers (caller guarantees space) |
+| `bool linear_search` | `false` | Use linear key search instead of hash tables for smaller binary size |
+| `size_t max_string_length` | `0` | Maximum string length when reading (0 = no limit) |
+| `size_t max_array_size` | `0` | Maximum array size when reading (0 = no limit) |
+| `size_t max_map_size` | `0` | Maximum map size when reading (0 = no limit) |
+| `bool allocate_raw_pointers` | `false` | Allocate memory for null raw pointers during deserialization |
 
 ### CSV Options (`glz::opts_csv`)
 
@@ -147,7 +153,7 @@ When `true` (default), Glaze assumes input buffers are null-terminated, enabling
 Enable JSONC-style comment parsing (`//` and `/* */`).
 
 #### `minified`
-When `true`, assumes input JSON has no unnecessary whitespace. Provides faster parsing but will fail on prettified input.
+When `true`, assumes input JSON has no unnecessary whitespace. This skips all whitespace checking during parsing, providing faster performance and slightly smaller binary size. Will fail on prettified input with whitespace between tokens.
 
 ### Validation Options
 
@@ -168,6 +174,19 @@ Skips `self_constraint` validation during deserialization. Useful for performanc
 
 #### `error_on_const_read`
 When `true`, attempting to read into a const value produces an error. By default, const values are silently skipped.
+
+#### `assume_sufficient_buffer`
+When `true`, skips bounds checking for fixed-size buffers (`std::array`, `std::span`). Use this when you've pre-validated that the buffer is large enough, for maximum write performance. Has no effect on resizable buffers (`std::string`, `std::vector`) or raw pointers (`char*`).
+
+```c++
+struct fast_opts : glz::opts {
+   bool assume_sufficient_buffer = true;
+};
+
+std::array<char, 8192> large_buffer;
+auto result = glz::write<fast_opts{}>(obj, large_buffer);
+// No bounds checking overhead - caller guarantees sufficient space
+```
 
 ### Output Control Options
 
@@ -200,6 +219,50 @@ When reading into arrays, appends new elements instead of replacing existing con
 #### `shrink_to_fit`
 Calls `shrink_to_fit()` on dynamic containers after reading to minimize memory usage.
 
+### Binary Size Options
+
+#### `linear_search`
+When `true`, uses linear search for object key lookup instead of compile-time generated hash tables. This significantly reduces binary size (typically 40-50% smaller) at the cost of slightly slower parsing for objects with many fields.
+
+```cpp
+struct small_opts : glz::opts {
+   bool linear_search = true;
+};
+
+auto ec = glz::read<small_opts{}>(obj, buffer);
+```
+
+**How it works:**
+
+By default, Glaze generates perfect hash tables at compile time for each struct type, enabling O(1) key lookup. This provides excellent runtime performance but increases binary size because:
+- Each struct type gets its own hash table stored in the binary
+- Jump tables are generated for field dispatch
+- Multiple template instantiations may be created for optimization
+
+With `linear_search = true`:
+- Keys are matched using simple linear comparison (O(n) where n = number of fields)
+- Hash tables are not generated
+- Fold-expression dispatch replaces jump tables
+- Template instantiation bloat is reduced
+
+**When to use:**
+
+- Embedded systems with limited flash/ROM
+- Applications where binary size matters more than peak parsing speed
+- Objects with few fields (< 10) where linear search has negligible overhead
+- Shipping smaller binaries to reduce download/install size
+
+**Trade-offs:**
+
+| Aspect | Default (hash) | `linear_search = true` |
+|--------|----------------|------------------------|
+| Key lookup | O(1) | O(n) |
+| Binary size | Larger | ~40-50% smaller |
+| Parse speed | Fastest | Slightly slower for large objects |
+| Compile time | Longer | Shorter |
+
+For objects with few fields, the performance difference is negligible. For objects with many fields (20+), hash-based lookup will be noticeably faster.
+
 ### Type Handling Options
 
 #### `quoted_num`
@@ -222,6 +285,31 @@ When `true` (default), ranges of `std::pair` are written as a single object with
 
 #### `allow_conversions`
 When `true` (default), BEVE allows implicit type conversions (e.g., reading a `double` into a `float`).
+
+#### `allocate_raw_pointers`
+When `true`, allows Glaze to allocate memory for null raw pointers during deserialization using `new`. By default (`false`), Glaze refuses to read into null raw pointers because it would need to allocate memory without any mechanism to free it, making memory leaks likely.
+
+```c++
+struct alloc_opts : glz::opts {
+   bool allocate_raw_pointers = true;
+};
+
+struct example { int x, y, z; };
+
+// Without the option, this fails with invalid_nullable_read
+std::vector<example*> vec;
+std::string json = R"([{"x":1,"y":2,"z":3}])";
+auto ec = glz::read<alloc_opts{}>(vec, json);
+// vec[0] is now allocated and populated
+
+// IMPORTANT: You must manually delete allocated pointers
+for (auto* p : vec) delete p;
+```
+
+> [!CAUTION]
+> When using this option, **you are responsible for freeing the allocated memory**. Glaze uses `new` to allocate but cannot track or delete the memory. Use smart pointers (`std::unique_ptr`, `std::shared_ptr`) when possible instead.
+
+This option works with JSON, BEVE, CBOR, and MSGPACK formats. See [Nullable Types](nullable-types.md) for more details.
 
 #### `float_max_write_precision`
 Limits the precision used when writing floating-point numbers. Options: `full`, `float32`, `float64`, `float128`.
@@ -258,3 +346,4 @@ For per-member formatting control, see the [`glz::float_format` wrapper](wrapper
 - [Wrappers](wrappers.md) - Per-field options using wrappers
 - [Field Validation](field-validation.md) - Customizing required field validation
 - [Partial Read](partial-read.md) - Reading partial documents
+- [Optimizing Performance](optimizing-performance.md) - Binary size and compilation time optimization

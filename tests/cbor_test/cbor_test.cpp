@@ -9,6 +9,7 @@
 #include <deque>
 #include <map>
 #include <random>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -2263,6 +2264,371 @@ void exceptions_tests()
 }
 #endif
 
+// Bounded buffer overflow tests for CBOR format
+namespace cbor_bounded_buffer_test_types
+{
+   struct simple_cbor_obj
+   {
+      int x = 42;
+      std::string name = "hello";
+   };
+
+   struct large_cbor_obj
+   {
+      int x = 42;
+      std::string long_name = "this is a very long string that definitely won't fit in a tiny buffer";
+      std::vector<int> data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+   };
+}
+
+void bounded_buffer_tests()
+{
+   using namespace cbor_bounded_buffer_test_types;
+
+   "cbor write to std::array with sufficient space succeeds"_test = [] {
+      simple_cbor_obj obj{};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_cbor(obj, buffer);
+      expect(not result) << "write should succeed with sufficient buffer";
+      expect(result.count > 0) << "count should be non-zero";
+      expect(result.count < buffer.size()) << "count should be less than buffer size";
+
+      // Verify roundtrip
+      simple_cbor_obj decoded{};
+      auto ec = glz::read_cbor(decoded, std::string_view{buffer.data(), result.count});
+      expect(!ec) << "read should succeed";
+      expect(decoded.x == obj.x) << "x should match";
+      expect(decoded.name == obj.name) << "name should match";
+   };
+
+   "cbor write to std::array that is too small returns buffer_overflow"_test = [] {
+      large_cbor_obj obj{};
+      std::array<char, 10> buffer{};
+
+      auto result = glz::write_cbor(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow error";
+   };
+
+   "cbor write to std::span with sufficient space succeeds"_test = [] {
+      simple_cbor_obj obj{};
+      std::array<char, 512> storage{};
+      std::span<char> buffer(storage);
+
+      auto result = glz::write_cbor(obj, buffer);
+      expect(not result) << "write should succeed with sufficient buffer";
+      expect(result.count > 0) << "count should be non-zero";
+   };
+
+   "cbor write to std::span that is too small returns buffer_overflow"_test = [] {
+      large_cbor_obj obj{};
+      std::array<char, 5> storage{};
+      std::span<char> buffer(storage);
+
+      auto result = glz::write_cbor(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow error";
+   };
+
+   "cbor write array to bounded buffer works correctly"_test = [] {
+      std::vector<int> arr{1, 2, 3, 4, 5};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_cbor(arr, buffer);
+      expect(not result) << "write should succeed";
+      expect(result.count > 0) << "count should be non-zero";
+
+      std::vector<int> decoded{};
+      auto ec = glz::read_cbor(decoded, std::string_view{buffer.data(), result.count});
+      expect(!ec) << "read should succeed";
+      expect(decoded == arr) << "decoded array should match";
+   };
+
+   "cbor write large array to small bounded buffer fails"_test = [] {
+      std::vector<int> arr(100, 42);
+      std::array<char, 8> buffer{};
+
+      auto result = glz::write_cbor(arr, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow for large array";
+   };
+
+   "cbor resizable buffer still works as before"_test = [] {
+      simple_cbor_obj obj{};
+      std::string buffer;
+
+      auto result = glz::write_cbor(obj, buffer);
+      expect(not result) << "write to resizable buffer should succeed";
+      expect(buffer.size() > 0) << "buffer should have data";
+   };
+
+   "cbor nested struct to bounded buffer"_test = [] {
+      my_struct obj{};
+      obj.i = 100;
+      obj.d = 3.14;
+      obj.hello = "world";
+      obj.arr = {1, 2, 3};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_cbor(obj, buffer);
+      expect(not result) << "write should succeed";
+
+      my_struct decoded{};
+      auto ec = glz::read_cbor(decoded, std::string_view{buffer.data(), result.count});
+      expect(!ec) << "read should succeed";
+      expect(decoded.i == obj.i) << "i should match";
+      expect(decoded.d == obj.d) << "d should match";
+      expect(decoded.hello == obj.hello) << "hello should match";
+   };
+
+   "cbor map to bounded buffer"_test = [] {
+      std::map<std::string, int> obj{{"one", 1}, {"two", 2}, {"three", 3}};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_cbor(obj, buffer);
+      expect(not result) << "write should succeed";
+
+      std::map<std::string, int> decoded{};
+      auto ec = glz::read_cbor(decoded, std::string_view{buffer.data(), result.count});
+      expect(!ec) << "read should succeed";
+      expect(decoded == obj) << "decoded map should match";
+   };
+}
+
+// Tests for user-configurable allocation limits (DoS prevention)
+void allocation_limits_tests()
+{
+   "cbor max_string_length rejects oversized strings"_test = [] {
+      // Write a string that's too long for the configured limit
+      std::string long_string(100, 'x');
+      std::string buffer;
+      expect(not glz::write_cbor(long_string, buffer));
+
+      // Try to read with a limit of 50 characters
+      struct limited_opts : glz::opts
+      {
+         uint32_t format = glz::CBOR;
+         size_t max_string_length = 50;
+      };
+
+      std::string result;
+      auto ec = glz::read<limited_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "should reject oversized string";
+   };
+
+   "cbor max_string_length accepts valid strings"_test = [] {
+      std::string short_string(30, 'x');
+      std::string buffer;
+      expect(not glz::write_cbor(short_string, buffer));
+
+      struct limited_opts : glz::opts
+      {
+         uint32_t format = glz::CBOR;
+         size_t max_string_length = 50;
+      };
+
+      std::string result;
+      auto ec = glz::read<limited_opts{}>(result, buffer);
+      expect(!ec) << "should accept string within limit";
+      expect(result == short_string);
+   };
+
+   "cbor max_array_size rejects oversized arrays"_test = [] {
+      std::vector<int> large_array(100, 42);
+      std::string buffer;
+      expect(not glz::write_cbor(large_array, buffer));
+
+      struct limited_opts : glz::opts
+      {
+         uint32_t format = glz::CBOR;
+         size_t max_array_size = 50;
+      };
+
+      std::vector<int> result;
+      auto ec = glz::read<limited_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "should reject oversized array";
+   };
+
+   "cbor max_array_size accepts valid arrays"_test = [] {
+      std::vector<int> small_array(30, 42);
+      std::string buffer;
+      expect(not glz::write_cbor(small_array, buffer));
+
+      struct limited_opts : glz::opts
+      {
+         uint32_t format = glz::CBOR;
+         size_t max_array_size = 50;
+      };
+
+      std::vector<int> result;
+      auto ec = glz::read<limited_opts{}>(result, buffer);
+      expect(!ec) << "should accept array within limit";
+      expect(result == small_array);
+   };
+
+   "cbor memory bomb protection - array count exceeds buffer"_test = [] {
+      // Craft a malicious buffer: CBOR array header claiming 1 billion elements
+      // Major type 4 (array) with 4-byte length: 0x9a followed by count
+      std::vector<uint8_t> malicious_buffer;
+      malicious_buffer.push_back(0x9a); // array with 4-byte length
+      uint32_t fake_count = 1'000'000'000;
+      // CBOR uses big-endian
+      malicious_buffer.push_back((fake_count >> 24) & 0xFF);
+      malicious_buffer.push_back((fake_count >> 16) & 0xFF);
+      malicious_buffer.push_back((fake_count >> 8) & 0xFF);
+      malicious_buffer.push_back(fake_count & 0xFF);
+
+      std::vector<int> result;
+      auto ec = glz::read_cbor(result, malicious_buffer);
+      expect(ec.ec == glz::error_code::unexpected_end) << "should reject memory bomb";
+   };
+
+   "cbor memory bomb protection - string length exceeds buffer"_test = [] {
+      // Craft a malicious buffer: CBOR text string header claiming huge length
+      // Major type 3 (text string) with 4-byte length: 0x7a followed by length
+      std::vector<uint8_t> malicious_buffer;
+      malicious_buffer.push_back(0x7a); // text string with 4-byte length
+      uint32_t fake_length = 1'000'000'000;
+      malicious_buffer.push_back((fake_length >> 24) & 0xFF);
+      malicious_buffer.push_back((fake_length >> 16) & 0xFF);
+      malicious_buffer.push_back((fake_length >> 8) & 0xFF);
+      malicious_buffer.push_back(fake_length & 0xFF);
+
+      std::string result;
+      auto ec = glz::read_cbor(result, malicious_buffer);
+      expect(ec.ec == glz::error_code::unexpected_end) << "should reject memory bomb";
+   };
+
+   "cbor max_map_size applies to std::map"_test = [] {
+      std::map<std::string, int> large_map;
+      for (int i = 0; i < 100; ++i) {
+         large_map["key" + std::to_string(i)] = i;
+      }
+      std::string buffer;
+      expect(not glz::write_cbor(large_map, buffer));
+
+      struct map_limited_opts : glz::opts
+      {
+         uint32_t format = glz::CBOR;
+         size_t max_map_size = 50;
+      };
+
+      std::map<std::string, int> result;
+      auto ec = glz::read<map_limited_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "should reject oversized map";
+   };
+
+   "cbor max_map_size accepts valid std::map"_test = [] {
+      std::map<std::string, int> small_map{{"a", 1}, {"b", 2}, {"c", 3}};
+      std::string buffer;
+      expect(not glz::write_cbor(small_map, buffer));
+
+      struct map_limited_opts : glz::opts
+      {
+         uint32_t format = glz::CBOR;
+         size_t max_map_size = 50;
+      };
+
+      std::map<std::string, int> result;
+      auto ec = glz::read<map_limited_opts{}>(result, buffer);
+      expect(!ec) << "should accept map within limit";
+      expect(result == small_map);
+   };
+
+   "cbor extended opts usage"_test = [] {
+      std::vector<int> large_array(100, 42);
+      std::string buffer;
+      expect(not glz::write_cbor(large_array, buffer));
+
+      // Extend opts to add allocation limits
+      struct array_limited_opts : glz::opts
+      {
+         uint32_t format = glz::CBOR;
+         size_t max_array_size = 50;
+      };
+
+      std::vector<int> result;
+      auto ec = glz::read<array_limited_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "should reject using extended opts";
+   };
+}
+
+// Structs for max_length wrapper tests
+struct CborMaxLengthStringStruct
+{
+   std::string name;
+   std::string description;
+};
+
+template <>
+struct glz::meta<CborMaxLengthStringStruct>
+{
+   using T = CborMaxLengthStringStruct;
+   static constexpr auto value = object("name", glz::max_length<&T::name, 10>, // limit to 10 chars
+                                        "description", &T::description // no limit
+   );
+};
+
+struct CborMaxLengthArrayStruct
+{
+   std::vector<int> small_list;
+   std::vector<int> big_list;
+};
+
+template <>
+struct glz::meta<CborMaxLengthArrayStruct>
+{
+   using T = CborMaxLengthArrayStruct;
+   static constexpr auto value = object("small_list", glz::max_length<&T::small_list, 5>, // limit to 5 elements
+                                        "big_list", &T::big_list // no limit
+   );
+};
+
+void max_length_wrapper_cbor_tests()
+{
+   "cbor max_length wrapper limits string field"_test = [] {
+      CborMaxLengthStringStruct original{.name = "hello", .description = "a long description"};
+      std::string buffer;
+      expect(not glz::write_cbor(original, buffer));
+
+      CborMaxLengthStringStruct result{};
+      auto ec = glz::read_cbor(result, buffer);
+      expect(!ec) << "should succeed for short name";
+      expect(result.name == "hello");
+      expect(result.description == "a long description");
+   };
+
+   "cbor max_length wrapper rejects oversized string field"_test = [] {
+      CborMaxLengthStringStruct original{.name = "this is way too long", .description = "ok"};
+      std::string buffer;
+      expect(not glz::write_cbor(original, buffer));
+
+      CborMaxLengthStringStruct result{};
+      auto ec = glz::read_cbor(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "should reject oversized name";
+   };
+
+   "cbor max_length wrapper limits array field"_test = [] {
+      CborMaxLengthArrayStruct original{.small_list = {1, 2, 3}, .big_list = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}};
+      std::string buffer;
+      expect(not glz::write_cbor(original, buffer));
+
+      CborMaxLengthArrayStruct result{};
+      auto ec = glz::read_cbor(result, buffer);
+      expect(!ec) << "should succeed for small list";
+      expect(result.small_list == std::vector<int>{1, 2, 3});
+      expect(result.big_list == std::vector<int>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+   };
+
+   "cbor max_length wrapper rejects oversized array field"_test = [] {
+      CborMaxLengthArrayStruct original{.small_list = {1, 2, 3, 4, 5, 6, 7, 8}, .big_list = {}};
+      std::string buffer;
+      expect(not glz::write_cbor(original, buffer));
+
+      CborMaxLengthArrayStruct result{};
+      auto ec = glz::read_cbor(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "should reject oversized small_list";
+   };
+}
+
 int main()
 {
    basic_types_tests();
@@ -2295,6 +2661,9 @@ int main()
    cbor_to_json_tests();
    past_fuzzing_issues();
    error_tests();
+   bounded_buffer_tests();
+   allocation_limits_tests();
+   max_length_wrapper_cbor_tests();
 #if __cpp_exceptions
    exceptions_tests();
 #endif

@@ -70,6 +70,7 @@ nav:
    - Quick Start: quick-start.md
    - Compile Time Options: options.md
    - Optimizing Performance: optimizing-performance.md
+   - Security: security.md
    - Rename Keys: rename-keys.md
    - Skip Keys: skip-keys.md
    - Generic JSON: generic-json.md
@@ -103,6 +104,9 @@ nav:
    - Partial Read/Write:
      - Partial Read: partial-read.md
      - Partial Write: partial-write.md
+   - Reading: reading.md
+   - Writing: writing.md
+   - Streaming I/O: streaming.md
    - Max Float Precision: max-float-precision.md
    - Ranges: ranges.md
  - Networking:

@@ -213,6 +213,32 @@ namespace glz
       }
    }
 
+   // Linear search for key matching - eliminates hash tables for smaller binaries
+   // Returns the index of the matching key, or N if not found
+   // Advances it past the key and closing quote
+   template <class T>
+   GLZ_ALWAYS_INLINE size_t decode_linear(is_context auto&& ctx, auto&& it, auto&& end)
+   {
+      static constexpr auto N = reflect<T>::size;
+      static constexpr auto& keys = reflect<T>::keys;
+
+      auto key_start = it;
+      skip_string_view(ctx, it, end);
+      if (bool(ctx.error)) [[unlikely]]
+         return N;
+      const sv key{key_start, size_t(it - key_start)};
+      ++it; // skip closing quote
+
+      // Linear search through known keys
+      for (size_t i = 0; i < N; ++i) {
+         if (keys[i] == key) {
+            return i;
+         }
+      }
+
+      return N; // not found
+   }
+
    template <auto Opts, class T, size_t I, class Value, class... SelectedIndex>
       requires(glaze_object_t<T> || reflectable<T>)
    void decode_index(Value&& value, is_context auto&& ctx, auto&& it, auto&& end, SelectedIndex&&... selected_index)
@@ -334,20 +360,128 @@ namespace glz
       }
    }
 
-   template <auto Opts, class T, auto& HashInfo, class Value, class... SelectedIndex>
+   template <auto Opts, class T, class Value, class... SelectedIndex>
       requires(glaze_object_t<T> || reflectable<T>)
    GLZ_ALWAYS_INLINE constexpr void parse_and_invoke(Value&& value, is_context auto&& ctx, auto&& it, auto&& end,
                                                      SelectedIndex&&... selected_index)
    {
-      constexpr auto type = HashInfo.type;
       constexpr auto N = reflect<T>::size;
-
-      static_assert(bool(type), "invalid hash algorithm");
 
       if constexpr (N == 1) {
          decode_index<Opts, T, 0>(value, ctx, it, end, selected_index...);
       }
+      else if constexpr (check_linear_search(Opts)) {
+         // Linear search path
+         auto key_start = it;
+         const auto index = decode_linear<T>(ctx, it, end);
+         if (bool(ctx.error)) [[unlikely]]
+            return;
+
+         if (index >= N) [[unlikely]] {
+            if constexpr (Opts.error_on_unknown_keys) {
+               ctx.error = error_code::unknown_key;
+               return;
+            }
+            else {
+               const sv key{key_start, size_t(it - key_start - 1)};
+               if constexpr (not Opts.null_terminated) {
+                  if (it == end) [[unlikely]] {
+                     ctx.error = error_code::unexpected_end;
+                     return;
+                  }
+               }
+               if (parse_ws_colon<Opts>(ctx, it, end)) {
+                  return;
+               }
+               parse<JSON>::handle_unknown<Opts>(key, value, ctx, it, end);
+               return;
+            }
+         }
+
+         if constexpr (not Opts.null_terminated) {
+            if (it == end) [[unlikely]] {
+               ctx.error = error_code::unexpected_end;
+               return;
+            }
+         }
+         if (skip_ws<Opts>(ctx, it, end)) {
+            return;
+         }
+         if (match_invalid_end<':', Opts>(ctx, it, end)) {
+            return;
+         }
+         if (skip_ws<Opts>(ctx, it, end)) {
+            return;
+         }
+
+         // Fold expression dispatch - avoids jump table overhead for smaller binary size
+         auto parse_field = [&]<size_t I>() {
+            if constexpr (check_skip_null_members_on_read(Opts)) {
+               if (*it == 'n') {
+                  ++it;
+                  if constexpr (not Opts.null_terminated) {
+                     if (it == end) [[unlikely]] {
+                        ctx.error = error_code::unexpected_end;
+                        return;
+                     }
+                  }
+                  match<"ull", Opts>(ctx, it, end);
+                  if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
+                     ((selected_index = I), ...);
+                  }
+                  return;
+               }
+            }
+
+            // Check for operation-specific skipping
+            if constexpr (meta_has_skip<std::remove_cvref_t<T>>) {
+               constexpr auto Key = get<I>(reflect<T>::keys);
+               if constexpr (meta<std::remove_cvref_t<T>>::skip(Key, {glz::operation::parse})) {
+                  skip_value<JSON>::op<Opts>(ctx, it, end);
+                  if (bool(ctx.error)) [[unlikely]]
+                     return;
+                  if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
+                     ((selected_index = I), ...);
+                  }
+                  return;
+               }
+            }
+
+            using V = refl_t<T, I>;
+            if constexpr (const_value_v<V>) {
+               if constexpr (check_error_on_const_read(Opts)) {
+                  ctx.error = error_code::attempt_const_read;
+               }
+               else {
+                  skip_value<JSON>::op<Opts>(ctx, it, end);
+               }
+            }
+            else {
+               // For linear_search, use Opts directly to avoid duplicate template instantiations
+               // We've already skipped whitespace before reaching here
+               if constexpr (glaze_object_t<T>) {
+                  from<JSON, std::remove_cvref_t<V>>::template op<Opts>(get_member(value, get<I>(reflect<T>::values)),
+                                                                        ctx, it, end);
+               }
+               else {
+                  from<JSON, std::remove_cvref_t<V>>::template op<Opts>(get_member(value, get<I>(to_tie(value))), ctx,
+                                                                        it, end);
+               }
+            }
+            if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
+               ((selected_index = I), ...);
+            }
+         };
+         [&]<size_t... Is>(std::index_sequence<Is...>) {
+            (void)(((index == Is ? (parse_field.template operator()<Is>(), true) : false) || ...));
+         }(std::make_index_sequence<N>{});
+      }
       else {
+         // Hash-based lookup
+         constexpr auto& HashInfo = hash_info<T>;
+         constexpr auto type = HashInfo.type;
+         static_assert(bool(type), "invalid hash algorithm");
+
          const auto index = decode_hash<JSON, T, HashInfo, HashInfo.type>::op(it, end);
 
          if (index >= N) [[unlikely]] {
@@ -356,7 +490,6 @@ namespace glz
                return;
             }
             else {
-               // we need to search until we find the ending quote of the key
                auto start = it;
                skip_string_view(ctx, it, end);
                if (bool(ctx.error)) [[unlikely]]
@@ -369,11 +502,9 @@ namespace glz
                      return;
                   }
                }
-
                if (parse_ws_colon<Opts>(ctx, it, end)) {
                   return;
                }
-
                parse<JSON>::handle_unknown<Opts>(key, value, ctx, it, end);
                return;
             }
@@ -705,6 +836,8 @@ namespace glz
             }
          }
          else {
+// float128_t requires std::from_chars for floating-point, unavailable on older Apple platforms (iOS < 16.3)
+#if !defined(_LIBCPP_VERSION) || defined(_LIBCPP_AVAILABILITY_HAS_TO_CHARS_FLOATING_POINT)
             if constexpr (is_float128<V>) {
                auto [ptr, ec] = std::from_chars(it, end, value);
                if (ec != std::errc()) {
@@ -713,7 +846,9 @@ namespace glz
                }
                it = ptr;
             }
-            else {
+            else
+#endif
+            {
                if constexpr (std::is_volatile_v<std::remove_reference_t<decltype(value)>>) {
                   // Hardware may interact with value changes, so we parse into a temporary and assign in one
                   // place
@@ -1821,6 +1956,22 @@ namespace glz
          if constexpr (N == 1) {
             decode_index<Opts, T, 0>(value, ctx, it, end);
          }
+         else if constexpr (check_linear_search(Opts)) {
+            // Linear search path for enums - decode_linear advances past closing quote
+            const auto index = decode_linear<T>(ctx, it, end);
+            if (bool(ctx.error)) [[unlikely]]
+               return;
+
+            if (index >= N) [[unlikely]] {
+               ctx.error = error_code::unexpected_enum;
+               return;
+            }
+
+            // Simply assign the enum value - fold expression dispatch
+            [&]<size_t... Is>(std::index_sequence<Is...>) {
+               (void)(((index == Is ? (value = get<Is>(reflect<T>::values), true) : false) || ...));
+            }(std::make_index_sequence<N>{});
+         }
          else {
             static constexpr auto HashInfo = hash_info<T>;
 
@@ -2072,6 +2223,25 @@ namespace glz
             // growing
             if constexpr (emplace_backable<T> || has_try_emplace_back<T>) {
                while (it < end) {
+                  // Streaming refill point: at start of each iteration, ensure buffer has data
+                  if constexpr (has_streaming_state<decltype(ctx)>) {
+                     if (ctx.stream.enabled()) {
+                        const size_t consumed = static_cast<size_t>(it - ctx.stream.data());
+                        const size_t remaining = ctx.stream.size() - consumed;
+                        // Refill when less than half of buffer remains to ensure space for next element
+                        if (remaining <= ctx.stream.size() / 2 || it >= end) {
+                           const char* new_it;
+                           const char* new_end;
+                           ctx.stream.consume_and_refill(consumed, new_it, new_end);
+                           it = new_it;
+                           end = new_end;
+                           if (it >= end && ctx.stream.at_eof()) {
+                              break; // No more data, exit loop normally
+                           }
+                        }
+                     }
+                  }
+
                   if constexpr (has_try_emplace_back<T>) {
                      if (value.try_emplace_back() != nullptr)
                         parse<JSON>::op<ws_handled<Opts>()>(value.back(), ctx, it, end);
@@ -2084,6 +2254,26 @@ namespace glz
 
                   if (bool(ctx.error)) [[unlikely]]
                      return;
+
+                  // Streaming refill point: after parsing each element, refill if buffer is low
+                  if constexpr (has_streaming_state<decltype(ctx)>) {
+                     if (ctx.stream.enabled()) {
+                        const size_t consumed = static_cast<size_t>(it - ctx.stream.data());
+                        // Refill when less than 25% of buffer remains to ensure enough space for next element
+                        if (ctx.stream.size() - consumed <= ctx.stream.size() / 4 || it >= end) {
+                           const char* new_it;
+                           const char* new_end;
+                           ctx.stream.consume_and_refill(consumed, new_it, new_end);
+                           it = new_it;
+                           end = new_end;
+                           if (it >= end && ctx.stream.at_eof()) {
+                              ctx.error = error_code::unexpected_end;
+                              return;
+                           }
+                        }
+                     }
+                  }
+
                   if (skip_ws<Opts>(ctx, it, end)) {
                      return;
                   }
@@ -2519,7 +2709,7 @@ namespace glz
             ctx.error = error_code::includer_error;
             auto& error_msg = error_buffer();
             error_msg = "file failed to open: " + string_file_path;
-            ctx.includer_error = error_msg;
+            ctx.custom_error_message = error_msg;
             return;
          }
 
@@ -2534,7 +2724,7 @@ namespace glz
             ctx.error = error_code::includer_error;
             auto& error_msg = error_buffer();
             error_msg = glz::format_error(ecode, nested_buffer);
-            ctx.includer_error = error_msg;
+            ctx.custom_error_message = error_msg;
             return;
          }
 
@@ -2777,6 +2967,26 @@ namespace glz
                   }
                }
 
+               // Streaming refill point: at start of each iteration, ensure buffer has data
+               if constexpr (has_streaming_state<decltype(ctx)>) {
+                  if (ctx.stream.enabled()) {
+                     const size_t consumed = static_cast<size_t>(it - ctx.stream.data());
+                     const size_t remaining = ctx.stream.size() - consumed;
+                     // Refill when less than half of buffer remains to ensure space for next key-value pair
+                     if (remaining <= ctx.stream.size() / 2 || it >= end) {
+                        const char* new_it;
+                        const char* new_end;
+                        ctx.stream.consume_and_refill(consumed, new_it, new_end);
+                        it = new_it;
+                        end = new_end;
+                        if (it >= end && ctx.stream.at_eof()) {
+                           ctx.error = error_code::unexpected_end;
+                           return;
+                        }
+                     }
+                  }
+               }
+
                if (*it == '}') {
                   if constexpr (not Opts.null_terminated) {
                      --ctx.indentation_level;
@@ -2954,7 +3164,7 @@ namespace glz
 
                   if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
                      size_t index = num_members;
-                     parse_and_invoke<Opts, T, hash_info<T>>(value, ctx, it, end, index);
+                     parse_and_invoke<Opts, T>(value, ctx, it, end, index);
                      if (bool(ctx.error)) [[unlikely]]
                         return;
                      if (index < num_members) {
@@ -2962,7 +3172,7 @@ namespace glz
                      }
                   }
                   else {
-                     parse_and_invoke<Opts, T, hash_info<T>>(value, ctx, it, end);
+                     parse_and_invoke<Opts, T>(value, ctx, it, end);
                      if (bool(ctx.error)) [[unlikely]]
                         return;
                   }
@@ -3054,6 +3264,26 @@ namespace glz
                         return;
                   }
                }
+
+               // Streaming refill point: after parsing each key-value pair, refill if buffer is low
+               if constexpr (has_streaming_state<decltype(ctx)>) {
+                  if (ctx.stream.enabled()) {
+                     const size_t consumed = static_cast<size_t>(it - ctx.stream.data());
+                     // Refill when less than 25% of buffer remains to ensure enough space for next element
+                     if (ctx.stream.size() - consumed <= ctx.stream.size() / 4 || it >= end) {
+                        const char* new_it;
+                        const char* new_end;
+                        ctx.stream.consume_and_refill(consumed, new_it, new_end);
+                        it = new_it;
+                        end = new_end;
+                        if (it >= end && ctx.stream.at_eof()) {
+                           ctx.error = error_code::unexpected_end;
+                           return;
+                        }
+                     }
+                  }
+               }
+
                if (skip_ws<Opts>(ctx, it, end)) {
                   return;
                }
@@ -3424,6 +3654,10 @@ namespace glz
                                              else if constexpr (constructible<V>) {
                                                 v = meta_construct_v<V>();
                                              }
+                                             else if constexpr (check_allocate_raw_pointers(Opts) &&
+                                                                std::is_pointer_v<V>) {
+                                                v = new std::remove_pointer_t<V>{};
+                                             }
                                              else {
                                                 ctx.error = error_code::invalid_nullable_read;
                                                 return;
@@ -3478,6 +3712,10 @@ namespace glz
                                                    v = std::make_shared<typename V::element_type>();
                                                 else if constexpr (constructible<V>) {
                                                    v = meta_construct_v<V>();
+                                                }
+                                                else if constexpr (check_allocate_raw_pointers(Opts) &&
+                                                                   std::is_pointer_v<V>) {
+                                                   v = new std::remove_pointer_t<V>{};
                                                 }
                                                 else {
                                                    ctx.error = error_code::invalid_nullable_read;
@@ -3628,6 +3866,9 @@ namespace glz
                                        else if constexpr (constructible<V>) {
                                           v = meta_construct_v<V>();
                                        }
+                                       else if constexpr (check_allocate_raw_pointers(Opts) && std::is_pointer_v<V>) {
+                                          v = new std::remove_pointer_t<V>{};
+                                       }
                                        else {
                                           ctx.error = error_code::invalid_nullable_read;
                                           return;
@@ -3706,6 +3947,9 @@ namespace glz
                                        v = std::make_shared<typename V::element_type>();
                                     else if constexpr (constructible<V>) {
                                        v = meta_construct_v<V>();
+                                    }
+                                    else if constexpr (check_allocate_raw_pointers(Opts) && std::is_pointer_v<V>) {
+                                       v = new std::remove_pointer_t<V>{};
                                     }
                                     else {
                                        ctx.error = error_code::invalid_nullable_read;
@@ -3792,6 +4036,9 @@ namespace glz
                                           v = std::make_shared<typename V::element_type>();
                                        else if constexpr (constructible<V>) {
                                           v = meta_construct_v<V>();
+                                       }
+                                       else if constexpr (check_allocate_raw_pointers(Opts) && std::is_pointer_v<V>) {
+                                          v = new std::remove_pointer_t<V>{};
                                        }
                                        else {
                                           ctx.error = error_code::invalid_nullable_read;
@@ -4160,6 +4407,9 @@ namespace glz
                   else if constexpr (constructible<T>) {
                      value = meta_construct_v<T>();
                   }
+                  else if constexpr (check_allocate_raw_pointers(Opts) && std::is_pointer_v<T>) {
+                     value = new std::remove_pointer_t<T>{};
+                  }
                   else {
                      // Cannot read into a null raw pointer
                      ctx.error = error_code::invalid_nullable_read;
@@ -4424,18 +4674,41 @@ namespace glz
    }
 
    template <read_supported<JSON> T, is_buffer Buffer>
+      requires(!is_input_streaming<std::remove_reference_t<Buffer>>)
    [[nodiscard]] error_ctx read_json(T& value, Buffer&& buffer)
    {
       context ctx{};
       return read<opts{}>(value, std::forward<Buffer>(buffer), ctx);
    }
 
+   // Overload for streaming input buffers (istream_buffer)
+   template <read_supported<JSON> T, class Buffer>
+      requires is_input_streaming<std::remove_reference_t<Buffer>>
+   [[nodiscard]] error_ctx read_json(T& value, Buffer&& buffer)
+   {
+      return read_streaming<opts{}>(value, std::forward<Buffer>(buffer));
+   }
+
    template <read_supported<JSON> T, is_buffer Buffer>
+      requires(!is_input_streaming<std::remove_reference_t<Buffer>>)
    [[nodiscard]] expected<T, error_ctx> read_json(Buffer&& buffer)
    {
       T value{};
       context ctx{};
       const error_ctx ec = read<opts{}>(value, std::forward<Buffer>(buffer), ctx);
+      if (ec) {
+         return unexpected<error_ctx>(ec);
+      }
+      return value;
+   }
+
+   // Overload for streaming input buffers (istream_buffer)
+   template <read_supported<JSON> T, class Buffer>
+      requires is_input_streaming<std::remove_reference_t<Buffer>>
+   [[nodiscard]] expected<T, error_ctx> read_json(Buffer&& buffer)
+   {
+      T value{};
+      const error_ctx ec = read_streaming<opts{}>(value, std::forward<Buffer>(buffer));
       if (ec) {
          return unexpected<error_ctx>(ec);
       }
@@ -4470,7 +4743,7 @@ namespace glz
       const auto ec = file_to_buffer(buffer, ctx.current_file);
 
       if (bool(ec)) {
-         return {ec};
+         return {0, ec};
       }
 
       return read<set_json<Opts>()>(value, buffer, ctx);
@@ -4485,7 +4758,7 @@ namespace glz
       const auto ec = file_to_buffer(buffer, ctx.current_file);
 
       if (bool(ec)) {
-         return {ec};
+         return {0, ec};
       }
 
       constexpr auto Options = opt_true<set_json<Opts>(), &opts::comments>;
