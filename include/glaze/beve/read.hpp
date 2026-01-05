@@ -584,6 +584,12 @@ namespace glz
                return;
             }
          }
+         if constexpr (has_runtime_max_string_length<std::decay_t<decltype(ctx)>>) {
+            if (ctx.max_string_length > 0 && n > ctx.max_string_length) [[unlikely]] {
+               ctx.error = error_code::invalid_length;
+               return;
+            }
+         }
          value.resize(n);
          std::memcpy(value.data(), it, n);
          it += n;
@@ -615,6 +621,12 @@ namespace glz
          }
          if constexpr (check_max_string_length(Opts) > 0) {
             if (n > check_max_string_length(Opts)) [[unlikely]] {
+               ctx.error = error_code::invalid_length;
+               return;
+            }
+         }
+         if constexpr (has_runtime_max_string_length<std::decay_t<decltype(ctx)>>) {
+            if (ctx.max_string_length > 0 && n > ctx.max_string_length) [[unlikely]] {
                ctx.error = error_code::invalid_length;
                return;
             }
@@ -812,6 +824,12 @@ namespace glz
                   return;
                }
             }
+            if constexpr (has_runtime_max_array_size<std::decay_t<decltype(ctx)>>) {
+               if (ctx.max_array_size > 0 && n > ctx.max_array_size) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
+            }
 
             if constexpr (resizable<T>) {
                value.resize(n);
@@ -857,6 +875,12 @@ namespace glz
                }
                if constexpr (check_max_array_size(Opts) > 0) {
                   if (n > check_max_array_size(Opts)) [[unlikely]] {
+                     ctx.error = error_code::invalid_length;
+                     return 0;
+                  }
+               }
+               if constexpr (has_runtime_max_array_size<std::decay_t<decltype(ctx)>>) {
+                  if (ctx.max_array_size > 0 && n > ctx.max_array_size) [[unlikely]] {
                      ctx.error = error_code::invalid_length;
                      return 0;
                   }
@@ -1005,6 +1029,12 @@ namespace glz
                   return;
                }
             }
+            if constexpr (has_runtime_max_array_size<std::decay_t<decltype(ctx)>>) {
+               if (ctx.max_array_size > 0 && n > ctx.max_array_size) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
+            }
 
             if constexpr (resizable<T>) {
                value.resize(n);
@@ -1025,6 +1055,12 @@ namespace glz
                }
                if constexpr (check_max_string_length(Opts) > 0) {
                   if (length > check_max_string_length(Opts)) [[unlikely]] {
+                     ctx.error = error_code::invalid_length;
+                     return;
+                  }
+               }
+               if constexpr (has_runtime_max_string_length<std::decay_t<decltype(ctx)>>) {
+                  if (ctx.max_string_length > 0 && length > ctx.max_string_length) [[unlikely]] {
                      ctx.error = error_code::invalid_length;
                      return;
                   }
@@ -1076,6 +1112,12 @@ namespace glz
             }
             if constexpr (check_max_array_size(Opts) > 0) {
                if (n > check_max_array_size(Opts)) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
+            }
+            if constexpr (has_runtime_max_array_size<std::decay_t<decltype(ctx)>>) {
+               if (ctx.max_array_size > 0 && n > ctx.max_array_size) [[unlikely]] {
                   ctx.error = error_code::invalid_length;
                   return;
                }
@@ -1144,6 +1186,12 @@ namespace glz
             }
             if constexpr (check_max_array_size(Opts) > 0) {
                if (n > check_max_array_size(Opts)) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
+            }
+            if constexpr (has_runtime_max_array_size<std::decay_t<decltype(ctx)>>) {
+               if (ctx.max_array_size > 0 && n > ctx.max_array_size) [[unlikely]] {
                   ctx.error = error_code::invalid_length;
                   return;
                }
@@ -1308,6 +1356,12 @@ namespace glz
             // Check user-configured map size limit
             if constexpr (check_max_map_size(Opts) > 0) {
                if (n > check_max_map_size(Opts)) [[unlikely]] {
+                  ctx.error = error_code::invalid_length;
+                  return;
+               }
+            }
+            if constexpr (has_runtime_max_map_size<std::decay_t<decltype(ctx)>>) {
+               if (ctx.max_map_size > 0 && n > ctx.max_map_size) [[unlikely]] {
                   ctx.error = error_code::invalid_length;
                   return;
                }
@@ -1961,8 +2015,14 @@ namespace glz
    //      if (!result) break;
    //      offset += *result;  // correctly advances past delimiter + value
    //   }
+   //
+   // Overload with context for runtime options (e.g., max_string_length, max_array_size):
+   //   my_context ctx{};
+   //   ctx.max_string_length = 1024;
+   //   auto result = glz::read_beve_at<glz::opts{}>(value, buffer, offset, ctx);
    template <auto Opts = opts{}, read_supported<BEVE> T, class Buffer>
-   [[nodiscard]] glz::expected<size_t, error_ctx> read_beve_at(T& value, Buffer&& buffer, size_t offset = 0)
+   [[nodiscard]] glz::expected<size_t, error_ctx> read_beve_at(T& value, Buffer&& buffer, size_t offset,
+                                                               is_context auto&& ctx)
    {
       static_assert(sizeof(decltype(*buffer.data())) == 1);
 
@@ -1970,7 +2030,6 @@ namespace glz
          return glz::unexpected(error_ctx{0, error_code::unexpected_end});
       }
 
-      context ctx{};
       auto it = reinterpret_cast<const char*>(buffer.data()) + offset;
       auto end = reinterpret_cast<const char*>(buffer.data()) + buffer.size();
       auto start = it;
@@ -1989,5 +2048,12 @@ namespace glz
       }
 
       return size_t(it - start); // total bytes consumed from offset (delimiter + value)
+   }
+
+   template <auto Opts = opts{}, read_supported<BEVE> T, class Buffer>
+   [[nodiscard]] glz::expected<size_t, error_ctx> read_beve_at(T& value, Buffer&& buffer, size_t offset = 0)
+   {
+      context ctx{};
+      return read_beve_at<Opts>(value, std::forward<Buffer>(buffer), offset, ctx);
    }
 }
