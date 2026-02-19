@@ -31,6 +31,22 @@
 
 namespace glz
 {
+   // Unless we can mutate the input buffer we need somewhere to store escaped strings for key lookup, etc.
+   // We don't put this in the context because we don't want to continually reallocate.
+   // IMPORTANT: Do not use when nested calls may need additional buffers on the same thread.
+   inline std::string& string_buffer() noexcept
+   {
+      static thread_local std::string buffer(256, '\0');
+      return buffer;
+   }
+
+   // We use an error buffer to avoid multiple allocations in the case that errors occur multiple times.
+   inline std::string& error_buffer() noexcept
+   {
+      static thread_local std::string buffer(256, '\0');
+      return buffer;
+   }
+
    // write out a string like type without quoting it
    template <class T>
    struct raw_t
@@ -376,8 +392,19 @@ namespace glz
       { *t };
    };
 
+   // Detect function pointers and function references (which should not be treated as nullable)
    template <class T>
-   concept nullable_like = nullable_t<T> && (!is_expected<T> && !std::is_array_v<T>);
+   concept is_function_ptr_or_ref =
+      std::is_function_v<std::remove_cvref_t<T>> || // function reference: void(&)(int)
+      (std::is_pointer_v<std::remove_cvref_t<T>> &&
+       std::is_function_v<std::remove_pointer_t<std::remove_cvref_t<T>>>); // function pointer: void(*)(int)
+
+   // Combined concept for any function pointer type (member or non-member)
+   template <class T>
+   concept is_any_function_ptr = is_member_function_pointer<T> || is_function_ptr_or_ref<T>;
+
+   template <class T>
+   concept nullable_like = nullable_t<T> && !is_expected<T> && !std::is_array_v<T> && !is_function_ptr_or_ref<T>;
 
    // For optional like types that cannot overload `operator bool()`
    template <class T>

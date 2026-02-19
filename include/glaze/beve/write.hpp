@@ -428,6 +428,16 @@ namespace glz
       {}
    };
 
+   // Handle function pointers and function references (no-op like member function pointers)
+   template <class T>
+      requires is_function_ptr_or_ref<T>
+   struct to<BEVE, T>
+   {
+      template <auto Opts, class... Args>
+      GLZ_ALWAYS_INLINE static void op(auto&&, is_context auto&&, Args&&...) noexcept
+      {}
+   };
+
    // write includers as empty strings
    template <is_includer T>
    struct to<BEVE, T>
@@ -999,6 +1009,33 @@ namespace glz
       }
    };
 
+   template <is_expected T>
+   struct to<BEVE, T> final
+   {
+      template <auto Opts, class B>
+      GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, B&& b, auto& ix)
+      {
+         if (value) {
+            if constexpr (not std::is_void_v<typename std::decay_t<T>::value_type>) {
+               serialize<BEVE>::op<Opts>(*value, ctx, b, ix);
+            }
+            else {
+               // void value type: serialize as empty object
+               constexpr uint8_t type = 0; // string key
+               constexpr uint8_t tag = tag::object | type;
+               dump_type(ctx, tag, b, ix);
+               if (bool(ctx.error)) [[unlikely]] {
+                  return;
+               }
+               dump_compressed_int<0>(b, ix);
+            }
+         }
+         else {
+            serialize<BEVE>::op<Opts>(unexpected_wrapper{&value.error()}, ctx, b, ix);
+         }
+      }
+   };
+
    template <nullable_t T>
       requires(std::is_array_v<T>)
    struct to<BEVE, T>
@@ -1011,7 +1048,7 @@ namespace glz
    };
 
    template <nullable_t T>
-      requires(!std::is_array_v<T>)
+      requires(!std::is_array_v<T> && not is_expected<T>)
    struct to<BEVE, T> final
    {
       template <auto Opts, class B>
@@ -1097,8 +1134,8 @@ namespace glz
          if constexpr (std::same_as<V, hidden> || std::same_as<V, skip>) {
             return true;
          }
-         else if constexpr (is_member_function_pointer<V>) {
-            return !check_write_member_functions(Opts);
+         else if constexpr (is_any_function_ptr<V>) {
+            return !check_write_function_pointers(Opts);
          }
          else {
             return false;
@@ -1170,8 +1207,8 @@ namespace glz
          if constexpr (std::same_as<V, hidden> || std::same_as<V, skip>) {
             return true;
          }
-         else if constexpr (is_member_function_pointer<V>) {
-            return !check_write_member_functions(Opts);
+         else if constexpr (is_any_function_ptr<V>) {
+            return !check_write_function_pointers(Opts);
          }
          else {
             return false;
@@ -1187,7 +1224,7 @@ namespace glz
       }
 
       template <auto Opts, class B>
-         requires(Opts.structs_as_arrays == true)
+         requires(check_structs_as_arrays(Opts) == true)
       static void op(auto&& value, is_context auto&& ctx, B&& b, auto& ix)
       {
          if (!ensure_space(ctx, b, ix + 1 + write_padding_bytes)) [[unlikely]] {
@@ -1227,7 +1264,7 @@ namespace glz
       }
 
       template <auto Options, class B>
-         requires(Options.structs_as_arrays == false)
+         requires(check_structs_as_arrays(Options) == false)
       static void op(auto&& value, is_context auto&& ctx, B&& b, auto& ix)
       {
          constexpr auto Opts = opening_handled_off<Options>();
@@ -1304,6 +1341,11 @@ namespace glz
             }
 
             // Second pass: write members
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4702) // unreachable code from if constexpr
+#endif
             for_each<N>([&]<size_t I>() {
                if (bool(ctx.error)) [[unlikely]] {
                   return;
@@ -1366,6 +1408,9 @@ namespace glz
                   }
                }
             });
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
          }
          else {
             // Static path: use compile-time count for better performance
@@ -1517,20 +1562,20 @@ namespace glz
    template <write_supported<BEVE> T, class Buffer>
    [[nodiscard]] error_ctx write_beve_untagged(T&& value, Buffer&& buffer)
    {
-      return write<opts{.format = BEVE, .structs_as_arrays = true}>(std::forward<T>(value),
-                                                                    std::forward<Buffer>(buffer));
+      return write<opt_true<opts{.format = BEVE}, structs_as_arrays_opt_tag{}>>(std::forward<T>(value),
+                                                                                std::forward<Buffer>(buffer));
    }
 
    template <write_supported<BEVE> T>
    [[nodiscard]] glz::expected<std::string, error_ctx> write_beve_untagged(T&& value)
    {
-      return write<opts{.format = BEVE, .structs_as_arrays = true}>(std::forward<T>(value));
+      return write<opt_true<opts{.format = BEVE}, structs_as_arrays_opt_tag{}>>(std::forward<T>(value));
    }
 
    template <auto Opts = opts{}, write_supported<BEVE> T>
    [[nodiscard]] error_ctx write_file_beve_untagged(T&& value, const std::string& file_name, auto&& buffer)
    {
-      return write_file_beve<opt_true<Opts, &opts::structs_as_arrays>>(std::forward<T>(value), file_name, buffer);
+      return write_file_beve<opt_true<Opts, structs_as_arrays_opt_tag{}>>(std::forward<T>(value), file_name, buffer);
    }
 
    // ===== Delimited BEVE support for multiple objects in one buffer =====

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <complex>
 #include <deque>
+#include <expected>
 #include <list>
 #include <map>
 #include <numbers>
@@ -1813,7 +1814,7 @@ suite example_reflection_without_keys_test = [] {
    "example_reflection_without_keys"_test = [] {
       std::string without_keys;
       my_example obj{.i = 55, .d = 3.14, .hello = "happy"};
-      constexpr glz::opts options{.format = glz::BEVE, .structs_as_arrays = true};
+      constexpr auto options = glz::opt_true<glz::opts{.format = glz::BEVE}, glz::structs_as_arrays_opt_tag{}>;
       expect(not glz::write<options>(obj, without_keys));
 
       std::string with_keys;
@@ -1870,7 +1871,7 @@ suite my_struct_without_keys_test = [] {
    "my_struct_without_keys"_test = [] {
       std::string without_keys;
       my_struct obj{.i = 55, .d = 3.14, .hello = "happy"};
-      constexpr glz::opts options{.format = glz::BEVE, .structs_as_arrays = true};
+      constexpr auto options = glz::opt_true<glz::opts{.format = glz::BEVE}, glz::structs_as_arrays_opt_tag{}>;
       expect(not glz::write<options>(obj, without_keys));
 
       std::string with_keys;
@@ -1929,8 +1930,8 @@ namespace variants
       "variants"_test = [] {
          std::vector<uint8_t> out;
          D d{};
-         expect(
-            not glz::write<glz::opts{.format = glz::BEVE, .structs_as_arrays = true}>(d, out)); // testing compilation
+         expect(not glz::write<glz::opt_true<glz::opts{.format = glz::BEVE}, glz::structs_as_arrays_opt_tag{}>>(
+            d, out)); // testing compilation
       };
    };
 }
@@ -3148,13 +3149,13 @@ suite member_function_pointer_beve_serialization = [] {
       expect(not glz::write_beve(input, buffer_default));
       expect(buffer_default.find("description") == std::string::npos);
 
-      struct opts_with_member_functions : glz::opts
+      struct opts_with_function_pointers : glz::opts
       {
-         bool write_member_functions = true;
+         bool write_function_pointers = true;
       };
 
       std::string buffer_opt_in{};
-      expect(not glz::write<glz::set_beve<opts_with_member_functions{}>()>(input, buffer_opt_in));
+      expect(not glz::write<glz::set_beve<opts_with_function_pointers{}>()>(input, buffer_opt_in));
       expect(buffer_opt_in.find("description") != std::string::npos);
    };
 };
@@ -5608,6 +5609,232 @@ suite beve_peek_header_tests = [] {
       auto result = glz::beve_peek_header(truncated);
       expect(!result.has_value());
       expect(result.error().ec == glz::error_code::unexpected_end);
+   };
+};
+
+// ============ beve_peek_header_at tests ============
+
+suite beve_peek_header_at_tests = [] {
+   "beve_peek_header_at basic offset"_test = [] {
+      // Create two concatenated BEVE values
+      int32_t val1 = 42;
+      std::string val2 = "hello";
+
+      auto buffer1 = glz::write_beve(val1).value();
+      auto buffer2 = glz::write_beve(val2).value();
+
+      // Concatenate them
+      std::string combined = buffer1 + buffer2;
+
+      // Peek at first value (offset 0)
+      auto result1 = glz::beve_peek_header_at(combined, 0);
+      expect(result1.has_value());
+      expect(result1->type == glz::tag::number);
+      expect(result1->count == 1u);
+
+      // Peek at second value (offset = size of first)
+      size_t offset = buffer1.size();
+      auto result2 = glz::beve_peek_header_at(combined, offset);
+      expect(result2.has_value());
+      expect(result2->type == glz::tag::string);
+      expect(result2->count == 5u); // "hello" has 5 characters
+   };
+
+   "beve_peek_header_at concatenated vectors"_test = [] {
+      std::vector<int> vec1{1, 2, 3};
+      std::vector<double> vec2{1.1, 2.2, 3.3, 4.4};
+
+      auto buffer1 = glz::write_beve(vec1).value();
+      auto buffer2 = glz::write_beve(vec2).value();
+
+      std::string combined = buffer1 + buffer2;
+
+      // Peek at first vector
+      auto result1 = glz::beve_peek_header_at(combined, 0);
+      expect(result1.has_value());
+      expect(result1->type == glz::tag::typed_array);
+      expect(result1->count == 3u);
+
+      // Peek at second vector
+      auto result2 = glz::beve_peek_header_at(combined, buffer1.size());
+      expect(result2.has_value());
+      expect(result2->type == glz::tag::typed_array);
+      expect(result2->count == 4u);
+   };
+
+   "beve_peek_header_at offset past end"_test = [] {
+      std::vector<int> val{1, 2, 3};
+      auto buffer = glz::write_beve(val).value();
+
+      // Offset equals buffer size - should fail
+      auto result = glz::beve_peek_header_at(buffer, buffer.size());
+      expect(!result.has_value());
+      expect(result.error().ec == glz::error_code::unexpected_end);
+
+      // Offset past buffer size - should fail
+      auto result2 = glz::beve_peek_header_at(buffer, buffer.size() + 10);
+      expect(!result2.has_value());
+      expect(result2.error().ec == glz::error_code::unexpected_end);
+   };
+
+   "beve_peek_header_at zero offset same as beve_peek_header"_test = [] {
+      std::map<std::string, int> val{{"a", 1}, {"b", 2}};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result_at = glz::beve_peek_header_at(buffer, 0);
+      auto result_no_offset = glz::beve_peek_header(buffer);
+
+      expect(result_at.has_value());
+      expect(result_no_offset.has_value());
+      expect(result_at->type == result_no_offset->type);
+      expect(result_at->count == result_no_offset->count);
+      expect(result_at->header_size == result_no_offset->header_size);
+   };
+
+   "beve_peek_header_at raw pointer overload"_test = [] {
+      int32_t val1 = 100;
+      std::string val2 = "test";
+
+      auto buffer1 = glz::write_beve(val1).value();
+      auto buffer2 = glz::write_beve(val2).value();
+
+      std::string combined = buffer1 + buffer2;
+
+      // Use raw pointer overload
+      auto result = glz::beve_peek_header_at(combined.data(), combined.size(), buffer1.size());
+      expect(result.has_value());
+      expect(result->type == glz::tag::string);
+      expect(result->count == 4u); // "test" has 4 characters
+   };
+
+   "beve_peek_header_at raw pointer offset past end"_test = [] {
+      std::string buffer = "test";
+      auto result = glz::beve_peek_header_at(buffer.data(), buffer.size(), buffer.size());
+      expect(!result.has_value());
+      expect(result.error().ec == glz::error_code::unexpected_end);
+   };
+
+   "beve_peek_header_at iterate concatenated data"_test = [] {
+      // Demonstrate iterating through concatenated BEVE values
+      std::vector<int> vec{1, 2, 3, 4, 5};
+      std::string str = "hello world";
+      double num = 3.14159;
+
+      auto buffer1 = glz::write_beve(vec).value();
+      auto buffer2 = glz::write_beve(str).value();
+      auto buffer3 = glz::write_beve(num).value();
+
+      std::string combined = buffer1 + buffer2 + buffer3;
+
+      size_t offset = 0;
+
+      // First value: vector
+      auto header1 = glz::beve_peek_header_at(combined, offset);
+      expect(header1.has_value());
+      expect(header1->type == glz::tag::typed_array);
+      expect(header1->count == 5u);
+      offset += buffer1.size();
+
+      // Second value: string
+      auto header2 = glz::beve_peek_header_at(combined, offset);
+      expect(header2.has_value());
+      expect(header2->type == glz::tag::string);
+      expect(header2->count == 11u); // "hello world"
+      offset += buffer2.size();
+
+      // Third value: number
+      auto header3 = glz::beve_peek_header_at(combined, offset);
+      expect(header3.has_value());
+      expect(header3->type == glz::tag::number);
+      expect(header3->count == 1u);
+   };
+
+   "beve_peek_header_at with variant at offset"_test = [] {
+      int32_t val1 = 42;
+      std::variant<int, std::string> val2 = std::string("variant");
+
+      auto buffer1 = glz::write_beve(val1).value();
+      auto buffer2 = glz::write_beve(val2).value();
+
+      std::string combined = buffer1 + buffer2;
+
+      auto result = glz::beve_peek_header_at(combined, buffer1.size());
+      expect(result.has_value());
+      expect(result->type == glz::tag::extensions);
+      expect(result->ext_type == glz::extension::variant);
+      expect(result->count == 1u); // std::string is at index 1
+   };
+
+   "beve_peek_header_at with complex at offset"_test = [] {
+      std::string val1 = "prefix";
+      std::complex<double> val2{3.14, 2.71};
+
+      auto buffer1 = glz::write_beve(val1).value();
+      auto buffer2 = glz::write_beve(val2).value();
+
+      std::string combined = buffer1 + buffer2;
+
+      auto result = glz::beve_peek_header_at(combined, buffer1.size());
+      expect(result.has_value());
+      expect(result->type == glz::tag::extensions);
+      expect(result->ext_type == glz::extension::complex);
+      expect(result->count == 2u); // real + imag
+   };
+
+   "beve_peek_header_at truncated at offset"_test = [] {
+      // Create a combined buffer where the second value is truncated
+      int32_t val1 = 42;
+      std::vector<int> val2(100); // Needs multi-byte count encoding
+
+      auto buffer1 = glz::write_beve(val1).value();
+      auto buffer2 = glz::write_beve(val2).value();
+
+      // Combine, but truncate buffer2 to just the tag
+      std::string combined = buffer1;
+      combined += buffer2.substr(0, 1);
+
+      auto result = glz::beve_peek_header_at(combined, buffer1.size());
+      expect(!result.has_value());
+      expect(result.error().ec == glz::error_code::unexpected_end);
+   };
+};
+
+suite expected_tests = [] {
+   "expected<void, int>"_test = [] {
+      std::expected<void, int> obj{};
+      std::string s{};
+      expect(not glz::write_beve(obj, s));
+
+      std::expected<void, int> obj2{};
+      expect(!glz::read_beve(obj2, s));
+      expect(bool(obj2));
+
+      obj = std::unexpected(42);
+      expect(not glz::write_beve(obj, s));
+
+      obj2.emplace();
+      expect(!glz::read_beve(obj2, s));
+      expect(!obj2);
+      expect(obj2.error() == 42);
+   };
+
+   "expected<std::string, int>"_test = [] {
+      std::expected<std::string, int> obj{"hello"};
+      std::string s{};
+      expect(not glz::write_beve(obj, s));
+
+      std::expected<std::string, int> obj2{};
+      expect(!glz::read_beve(obj2, s));
+      expect(bool(obj2));
+      expect(obj2.value() == "hello");
+
+      obj = std::unexpected(42);
+      expect(not glz::write_beve(obj, s));
+
+      obj2.emplace();
+      expect(!glz::read_beve(obj2, s));
+      expect(!obj2);
+      expect(obj2.error() == 42);
    };
 };
 

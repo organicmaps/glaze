@@ -9,19 +9,11 @@
 #include <variant>
 
 #include "glaze/core/chrono.hpp"
+#include "glaze/simd/avx.hpp"
+#include "glaze/simd/neon.hpp"
+#include "glaze/simd/simd.hpp"
+#include "glaze/simd/sse.hpp"
 #include "glaze/util/parse.hpp"
-
-#if !defined(GLZ_DISABLE_SIMD) && (defined(__x86_64__) || defined(_M_X64))
-#if defined(_MSC_VER)
-#include <intrin.h>
-#else
-#include <immintrin.h>
-#endif
-
-#if defined(__AVX2__)
-#define GLZ_USE_AVX2
-#endif
-#endif
 
 #if defined(_MSC_VER) && !defined(__clang__)
 // disable "unreachable code" warnings, which are often invalid due to constexpr branching
@@ -88,13 +80,13 @@ namespace glz
    GLZ_ALWAYS_INLINE void write_object_entry_separator(is_context auto&& ctx, B&& b, auto& ix)
    {
       if constexpr (Opts.prettify) {
-         if (!ensure_space(ctx, b, ix + ctx.indentation_level + write_padding_bytes)) [[unlikely]] {
+         if (!ensure_space(ctx, b, ix + ctx.depth + write_padding_bytes)) [[unlikely]] {
             return;
          }
          std::memcpy(&b[ix], ",\n", 2);
          ix += 2;
-         std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-         ix += ctx.indentation_level;
+         std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+         ix += ctx.depth;
       }
       else {
          if constexpr (minified_check) {
@@ -121,9 +113,9 @@ namespace glz
          if constexpr (!check_opening_handled(Opts)) {
             dump('{', b, ix);
             if constexpr (Opts.prettify) {
-               ctx.indentation_level += Opts.indentation_width;
+               ctx.depth += check_indentation_width(Opts);
                dump('\n', b, ix);
-               dumpn(Opts.indentation_char, ctx.indentation_level, b, ix);
+               dumpn(check_indentation_char(Opts), ctx.depth, b, ix);
             }
          }
 
@@ -223,9 +215,9 @@ namespace glz
          if constexpr (!check_opening_handled(Opts)) {
             dump('{', b, ix);
             if constexpr (Opts.prettify) {
-               ctx.indentation_level += Opts.indentation_width;
+               ctx.depth += check_indentation_width(Opts);
                dump('\n', b, ix);
-               dumpn(Opts.indentation_char, ctx.indentation_level, b, ix);
+               dumpn(check_indentation_char(Opts), ctx.depth, b, ix);
             }
          }
 
@@ -314,9 +306,9 @@ namespace glz
          }
 
          if constexpr (Opts.prettify) {
-            ctx.indentation_level -= Opts.indentation_width;
+            ctx.depth -= check_indentation_width(Opts);
             dump('\n', b, ix);
-            dumpn(Opts.indentation_char, ctx.indentation_level, b, ix);
+            dumpn(check_indentation_char(Opts), ctx.depth, b, ix);
          }
 
          if (not bool(ctx.error)) [[likely]] {
@@ -337,9 +329,9 @@ namespace glz
          if constexpr (!check_opening_handled(Opts)) {
             dump('{', b, ix);
             if constexpr (Opts.prettify) {
-               ctx.indentation_level += Opts.indentation_width;
+               ctx.depth += check_indentation_width(Opts);
                dump('\n', b, ix);
-               dumpn(Opts.indentation_char, ctx.indentation_level, b, ix);
+               dumpn(check_indentation_char(Opts), ctx.depth, b, ix);
             }
          }
 
@@ -436,9 +428,9 @@ namespace glz
          }
 
          if constexpr (Opts.prettify) {
-            ctx.indentation_level -= Opts.indentation_width;
+            ctx.depth -= check_indentation_width(Opts);
             dump('\n', b, ix);
-            dumpn(Opts.indentation_char, ctx.indentation_level, b, ix);
+            dumpn(check_indentation_char(Opts), ctx.depth, b, ix);
          }
 
          if (not bool(ctx.error)) [[likely]] {
@@ -520,9 +512,56 @@ namespace glz
       return value;
    }
 
+   // Only use this if you are not prettifying
+   // Returns zero if the fixed size cannot be determined
+   template <class T>
+   inline constexpr size_t fixed_padding = [] {
+      constexpr auto N = reflect<T>::size;
+      size_t fixed = 2 + 16; // {} + extra padding
+      for_each_short_circuit<N>([&]<auto I>() -> bool {
+         using val_t = field_t<T, I>;
+         if constexpr (required_padding<val_t>()) {
+            fixed += required_padding<val_t>();
+            fixed += reflect<T>::keys[I].size() + 2; // quoted key length
+            fixed += 2; // colon and comma
+            return false; // continue
+         }
+         else {
+            fixed = 0;
+            return true; // break
+         }
+      });
+      if (fixed) {
+         fixed = round_up_to_nearest_16(fixed);
+      }
+      return fixed;
+   }();
+
+   // Returns true if writing type T to JSON can potentially set ctx.error.
+   // Checks for a static constexpr bool `can_error` in the to<JSON, T> specialization.
+   // If not present, conservatively assumes true.
+   template <class T>
+   constexpr bool write_can_error()
+   {
+      using V = std::remove_cvref_t<T>;
+      if constexpr (always_skipped<V>) {
+         return false; // hidden/skip types are never written
+      }
+      else if constexpr (requires {
+                            { to<JSON, V>::can_error } -> std::convertible_to<bool>;
+                         }) {
+         return to<JSON, V>::can_error;
+      }
+      else {
+         return true;
+      }
+   }
+
    template <is_bitset T>
    struct to<JSON, T>
    {
+      static constexpr bool can_error = false;
+
       template <auto Opts, class B>
       static void op(auto&& value, is_context auto&& ctx, B&& b, auto& ix)
       {
@@ -549,6 +588,8 @@ namespace glz
    template <glaze_flags_t T>
    struct to<JSON, T>
    {
+      static constexpr bool can_error = false;
+
       template <auto Opts, class B>
       static void op(auto&& value, is_context auto&& ctx, B&& b, auto& ix)
       {
@@ -600,7 +641,7 @@ namespace glz
       template <auto Opts>
       static void op(auto&&, is_context auto&&, auto&& b, auto& ix) noexcept
       {
-         if constexpr (check_write_member_functions(Opts)) {
+         if constexpr (check_write_function_pointers(Opts)) {
             constexpr sv type_name = name_v<T>;
             dump('"', b, ix);
             dump(type_name, b, ix);
@@ -651,6 +692,8 @@ namespace glz
    template <boolean_like T>
    struct to<JSON, T>
    {
+      static constexpr bool can_error = false;
+
       template <auto Opts, class B>
       GLZ_ALWAYS_INLINE static void op(const bool value, is_context auto&& ctx, B&& b, auto& ix)
       {
@@ -686,6 +729,8 @@ namespace glz
    template <num_t T>
    struct to<JSON, T>
    {
+      static constexpr bool can_error = false;
+
       template <auto Opts, class B>
       GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, B&& b, auto& ix)
       {
@@ -698,7 +743,7 @@ namespace glz
 
          static constexpr auto O = write_unchecked_on<Opts>();
 
-         if constexpr (Opts.quoted_num) {
+         if constexpr (check_quoted_num(Opts)) {
             std::memcpy(&b[ix], "\"", 1);
             ++ix;
             write_chars::op<O>(value, ctx, b, ix);
@@ -715,10 +760,12 @@ namespace glz
       requires str_t<T> || char_t<T>
    struct to<JSON, T>
    {
+      static constexpr bool can_error = false;
+
       template <auto Opts, class B>
       static void op(auto&& value, is_context auto&& ctx, B&& b, auto& ix)
       {
-         if constexpr (Opts.number) {
+         if constexpr (check_string_as_number(Opts)) {
             const sv str = [&]() -> const sv {
                if constexpr (!char_array_t<T> && std::is_pointer_v<std::decay_t<T>>) {
                   return value ? value : "";
@@ -736,7 +783,7 @@ namespace glz
             dump_maybe_empty<false>(str, b, ix);
          }
          else if constexpr (char_t<T>) {
-            if constexpr (Opts.raw) {
+            if constexpr (check_unquoted(Opts)) {
                dump(value, b, ix);
             }
             else {
@@ -778,7 +825,7 @@ namespace glz
             }
          }
          else {
-            if constexpr (Opts.raw_string) {
+            if constexpr (check_raw_string(Opts)) {
                const sv str = [&]() -> const sv {
                   if constexpr (!char_array_t<T> && std::is_pointer_v<std::decay_t<T>>) {
                      return value ? value : "";
@@ -798,7 +845,7 @@ namespace glz
                }
                // now we don't have to check writing
 
-               if constexpr (not Opts.raw) {
+               if constexpr (not check_unquoted(Opts)) {
                   std::memcpy(&b[ix], "\"", 1);
                   ++ix;
                }
@@ -807,7 +854,7 @@ namespace glz
                   std::memcpy(&b[ix], str.data(), n);
                   ix += n;
                }
-               if constexpr (not Opts.raw) {
+               if constexpr (not check_unquoted(Opts)) {
                   std::memcpy(&b[ix], "\"", 1);
                   ++ix;
                }
@@ -846,7 +893,7 @@ namespace glz
                }
                // now we don't have to check writing
 
-               if constexpr (Opts.raw) {
+               if constexpr (check_unquoted(Opts)) {
                   if (n) {
                      std::memcpy(&b[ix], str.data(), n);
                      ix += n;
@@ -861,73 +908,44 @@ namespace glz
                   const auto start = &b[ix];
                   auto data = start;
 
-                  // We don't check for writing out invalid characters as this can be tested by the user if
-                  // necessary. In the case of invalid JSON characters we write out null characters to
-                  // showcase the error and make the JSON invalid. These would then be detected upon reading
-                  // the JSON.
+                  // By default we don't escape control characters for performance. Invalid JSON characters
+                  // result in null characters in the output, making the JSON invalid — these would then be
+                  // detected upon reading. Enable the `escape_control_characters` option to properly escape
+                  // control characters (0x00–0x1F) as \uXXXX sequences.
 
-#if defined(GLZ_USE_AVX2)
-                  // Optimization for systems with AVX2 support
-                  if (n > 31) {
-                     const __m256i lo7_mask = _mm256_set1_epi8(0b01111111);
-                     const __m256i quote_char = _mm256_set1_epi8('"');
-                     const __m256i backslash_char = _mm256_set1_epi8('\\');
-                     const __m256i less_32_mask = _mm256_set1_epi8(0b01100000);
-                     const __m256i high_bit_mask = _mm256_set1_epi8(static_cast<int8_t>(0b10000000));
-
-                     for (const char* end_m31 = e - 31; c < end_m31;) {
-                        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(c));
-
-                        _mm256_storeu_si256(reinterpret_cast<__m256i*>(data), v);
-
-                        const __m256i lo7 = _mm256_and_si256(v, lo7_mask);
-                        const __m256i quote = _mm256_add_epi8(_mm256_xor_si256(lo7, quote_char), lo7_mask);
-                        const __m256i backslash = _mm256_add_epi8(_mm256_xor_si256(lo7, backslash_char), lo7_mask);
-                        const __m256i less_32 = _mm256_add_epi8(_mm256_and_si256(v, less_32_mask), lo7_mask);
-
-                        __m256i temp = _mm256_and_si256(quote, backslash);
-                        temp = _mm256_and_si256(temp, less_32);
-                        temp = _mm256_or_si256(temp, v);
-                        __m256i next = _mm256_andnot_si256(temp, _mm256_set1_epi8(-1)); // Equivalent to ~temp
-                        next = _mm256_and_si256(next, high_bit_mask);
-
-                        uint32_t mask = _mm256_movemask_epi8(next);
-
-                        if (mask == 0) {
-                           data += 32;
-                           c += 32;
-                           continue;
-                        }
-
-                        uint32_t length = countr_zero(mask);
-
-                        c += length;
-                        data += length;
-
-                        if constexpr (check_escape_control_characters(Opts)) {
-                           if (const auto escaped = char_escape_table[uint8_t(*c)]; escaped) {
-                              std::memcpy(data, &escaped, 2);
-                              data += 2;
-                           }
-                           else {
-                              // Write as \uXXXX format for control characters
-                              char unicode_escape[6] = {'\\', 'u', '0', '0', '0', '0'};
-                              constexpr char hex_digits[] = "0123456789ABCDEF";
-                              unicode_escape[4] = hex_digits[(uint8_t(*c) >> 4) & 0xF];
-                              unicode_escape[5] = hex_digits[uint8_t(*c) & 0xF];
-                              std::memcpy(data, unicode_escape, 6);
-                              data += 6;
-                           }
-                        }
-                        else {
-                           std::memcpy(data, &char_escape_table[uint8_t(*c)], 2);
+                  // Escape handler: writes the escaped form of *c into data, advances both pointers
+                  auto write_escape = [&]() {
+                     if constexpr (check_escape_control_characters(Opts)) {
+                        if (const auto escaped = char_escape_table[uint8_t(*c)]; escaped) {
+                           std::memcpy(data, &escaped, 2);
                            data += 2;
                         }
-                        ++c;
+                        else {
+                           char unicode_escape[6] = {'\\', 'u', '0', '0', '0', '0'};
+                           constexpr char hex_digits[] = "0123456789ABCDEF";
+                           unicode_escape[4] = hex_digits[(uint8_t(*c) >> 4) & 0xF];
+                           unicode_escape[5] = hex_digits[uint8_t(*c) & 0xF];
+                           std::memcpy(data, unicode_escape, 6);
+                           data += 6;
+                        }
                      }
-                  }
+                     else {
+                        std::memcpy(data, &char_escape_table[uint8_t(*c)], 2);
+                        data += 2;
+                     }
+                     ++c;
+                  };
+
+#if defined(GLZ_USE_AVX2)
+                  detail::avx2_string_escape(c, e, data, n, write_escape);
+#endif
+#if defined(GLZ_USE_SSE2)
+                  detail::sse2_string_escape(c, e, data, n, write_escape);
+#elif defined(GLZ_USE_NEON)
+                  detail::neon_string_escape(c, e, data, n, write_escape);
 #endif
 
+                  // SWAR: 8 bytes at a time
                   if (n > 7) {
                      for (const auto end_m7 = e - 7; c < end_m7;) {
                         std::memcpy(data, c, 8);
@@ -954,31 +972,11 @@ namespace glz
                         const auto length = (countr_zero(next) >> 3);
                         c += length;
                         data += length;
-
-                        if constexpr (check_escape_control_characters(Opts)) {
-                           if (const auto escaped = char_escape_table[uint8_t(*c)]; escaped) {
-                              std::memcpy(data, &escaped, 2);
-                              data += 2;
-                           }
-                           else {
-                              // Write as \uXXXX format for control characters
-                              char unicode_escape[6] = {'\\', 'u', '0', '0', '0', '0'};
-                              constexpr char hex_digits[] = "0123456789ABCDEF";
-                              unicode_escape[4] = hex_digits[(uint8_t(*c) >> 4) & 0xF];
-                              unicode_escape[5] = hex_digits[uint8_t(*c) & 0xF];
-                              std::memcpy(data, unicode_escape, 6);
-                              data += 6;
-                           }
-                        }
-                        else {
-                           std::memcpy(data, &char_escape_table[uint8_t(*c)], 2);
-                           data += 2;
-                        }
-                        ++c;
+                        write_escape();
                      }
                   }
 
-                  // Tail end of buffer. Uncommon for long strings.
+                  // Scalar tail
                   for (; c < e; ++c) {
                      if (const auto escaped = char_escape_table[uint8_t(*c)]; escaped) {
                         std::memcpy(data, &escaped, 2);
@@ -986,7 +984,6 @@ namespace glz
                      }
                      else if constexpr (check_escape_control_characters(Opts)) {
                         if (uint8_t(*c) < 0x20) {
-                           // Write as \uXXXX format for control characters
                            char unicode_escape[6] = {'\\', 'u', '0', '0', '0', '0'};
                            constexpr char hex_digits[] = "0123456789ABCDEF";
                            unicode_escape[4] = hex_digits[(uint8_t(*c) >> 4) & 0xF];
@@ -1019,6 +1016,8 @@ namespace glz
       requires((glaze_enum_t<T> || (meta_keys<T> && std::is_enum_v<std::decay_t<T>>)) && not custom_write<T>)
    struct to<JSON, T>
    {
+      static constexpr bool can_error = false;
+
       template <auto Opts, class... Args>
       GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, Args&&... args)
       {
@@ -1026,11 +1025,11 @@ namespace glz
          if (!str.empty()) {
             // TODO: Assumes people dont use strings with chars that need to be escaped for their enum names
             // TODO: Could create a pre quoted map for better performance
-            if constexpr (not Opts.raw) {
+            if constexpr (not check_unquoted(Opts)) {
                dump('"', args...);
             }
             dump_maybe_empty(str, args...);
-            if constexpr (not Opts.raw) {
+            if constexpr (not check_unquoted(Opts)) {
                dump('"', args...);
             }
          }
@@ -1045,6 +1044,8 @@ namespace glz
       requires(!meta_keys<T> && std::is_enum_v<std::decay_t<T>> && !glaze_enum_t<T> && !custom_write<T>)
    struct to<JSON, T>
    {
+      static constexpr bool can_error = false;
+
       template <auto Opts, class... Args>
       GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, Args&&... args)
       {
@@ -1075,6 +1076,23 @@ namespace glz
          }
          std::memcpy(&b[ix], "\"", 1);
          ++ix;
+      }
+   };
+
+   // Handle function pointers and function references (serialize as their type name)
+   template <class T>
+      requires is_function_ptr_or_ref<T>
+   struct to<JSON, T>
+   {
+      template <auto Opts>
+      static void op(auto&&, is_context auto&&, auto&& b, auto& ix) noexcept
+      {
+         if constexpr (check_write_function_pointers(Opts)) {
+            constexpr sv type_name = name_v<T>;
+            dump('"', b, ix);
+            dump(type_name, b, ix);
+            dump('"', b, ix);
+         }
       }
    };
 
@@ -1118,14 +1136,14 @@ namespace glz
    GLZ_ALWAYS_INLINE void write_array_entry_separator(is_context auto&& ctx, B&& b, auto& ix)
    {
       if constexpr (Opts.prettify) {
-         if (!ensure_space(ctx, b, ix + ctx.indentation_level + write_padding_bytes)) [[unlikely]] {
+         if (!ensure_space(ctx, b, ix + ctx.depth + write_padding_bytes)) [[unlikely]] {
             return;
          }
-         if constexpr (Opts.new_lines_in_arrays) {
+         if constexpr (check_new_lines_in_arrays(Opts)) {
             std::memcpy(&b[ix], ",\n", 2);
             ix += 2;
-            std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-            ix += ctx.indentation_level;
+            std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+            ix += ctx.depth;
          }
          else {
             std::memcpy(&b[ix], ", ", 2);
@@ -1151,14 +1169,14 @@ namespace glz
    GLZ_ALWAYS_INLINE void write_pair_content(const Key& key, Value&& value, Ctx& ctx, B&& b, auto& ix)
    {
       if constexpr (str_t<Key> || char_t<Key> || glaze_enum_t<Key> || mimics_str_t<Key> || custom_str_t<Key> ||
-                    Opts.quoted_num) {
+                    check_quoted_num(Opts)) {
          to<JSON, core_t<Key>>::template op<Opts>(key, ctx, b, ix);
       }
       else if constexpr (num_t<Key>) {
-         serialize<JSON>::op<opt_true<Opts, &opts::quoted_num>>(key, ctx, b, ix);
+         serialize<JSON>::op<opt_true<Opts, quoted_num_opt_tag{}>>(key, ctx, b, ix);
       }
       else {
-         serialize<JSON>::op<opt_false<Opts, &opts::raw_string>>(quoted_t<const Key>{key}, ctx, b, ix);
+         serialize<JSON>::op<opt_false<Opts, raw_string_opt_tag{}>>(quoted_t<const Key>{key}, ctx, b, ix);
       }
       if (bool(ctx.error)) [[unlikely]] {
          return;
@@ -1175,8 +1193,10 @@ namespace glz
    }
 
    template <class T>
-   concept array_padding_known =
-      requires { typename T::value_type; } && (required_padding<typename T::value_type>() > 0);
+   concept array_padding_known = requires { typename T::value_type; } &&
+                                 (required_padding<typename T::value_type>() > 0 ||
+                                  ((glaze_object_t<typename T::value_type> || reflectable<typename T::value_type>) &&
+                                   fixed_padding<typename T::value_type> > 0));
 
    template <class T>
       requires(writable_array_t<T> || writable_map_t<T>)
@@ -1196,26 +1216,30 @@ namespace glz
             if constexpr (has_size<T> && array_padding_known<T> && !has_bounded_capacity<B>) {
                const auto n = value.size();
 
-               static constexpr auto value_padding = required_padding<typename T::value_type>();
+               static constexpr auto value_padding = []() -> size_t {
+                  if constexpr (required_padding<typename T::value_type>() > 0)
+                     return required_padding<typename T::value_type>();
+                  else
+                     return fixed_padding<typename T::value_type>;
+               }();
 
                if constexpr (Opts.prettify) {
-                  if constexpr (Opts.new_lines_in_arrays) {
-                     ctx.indentation_level += Opts.indentation_width;
+                  if constexpr (check_new_lines_in_arrays(Opts)) {
+                     ctx.depth += check_indentation_width(Opts);
                   }
 
                   // add space for '\n' and ',' characters for each element, hence `+ 2`
                   // use n + 1 because we put the end array character after the last element with whitespace
-                  if (!ensure_space(ctx, b,
-                                    ix + (n + 1) * (value_padding + ctx.indentation_level + 2) + write_padding_bytes))
+                  if (!ensure_space(ctx, b, ix + (n + 1) * (value_padding + ctx.depth + 2) + write_padding_bytes))
                      [[unlikely]] {
                      return;
                   }
 
-                  if constexpr (Opts.new_lines_in_arrays) {
+                  if constexpr (check_new_lines_in_arrays(Opts)) {
                      std::memcpy(&b[ix], "[\n", 2);
                      ix += 2;
-                     std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                     ix += ctx.indentation_level;
+                     std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                     ix += ctx.depth;
                   }
                   else {
                      std::memcpy(&b[ix], "[", 1);
@@ -1239,11 +1263,11 @@ namespace glz
                ++it;
                for (const auto fin = std::end(value); it != fin; ++it) {
                   if constexpr (Opts.prettify) {
-                     if constexpr (Opts.new_lines_in_arrays) {
+                     if constexpr (check_new_lines_in_arrays(Opts)) {
                         std::memcpy(&b[ix], ",\n", 2);
                         ix += 2;
-                        std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                        ix += ctx.indentation_level;
+                        std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                        ix += ctx.depth;
                      }
                      else {
                         std::memcpy(&b[ix], ", ", 2);
@@ -1260,12 +1284,12 @@ namespace glz
 
                   to<JSON, val_t>::template op<write_unchecked_on<Opts>()>(*it, ctx, b, ix);
                }
-               if constexpr (Opts.prettify && Opts.new_lines_in_arrays) {
-                  ctx.indentation_level -= Opts.indentation_width;
+               if constexpr (Opts.prettify && check_new_lines_in_arrays(Opts)) {
+                  ctx.depth -= check_indentation_width(Opts);
                   std::memcpy(&b[ix], "\n", 1);
                   ++ix;
-                  std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                  ix += ctx.indentation_level;
+                  std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                  ix += ctx.depth;
                }
 
                std::memcpy(&b[ix], "]", 1);
@@ -1275,19 +1299,19 @@ namespace glz
                // we either can't get the size (std::forward_list) or we cannot compute the allocation size
 
                if constexpr (Opts.prettify) {
-                  if constexpr (Opts.new_lines_in_arrays) {
-                     ctx.indentation_level += Opts.indentation_width;
+                  if constexpr (check_new_lines_in_arrays(Opts)) {
+                     ctx.depth += check_indentation_width(Opts);
                   }
 
-                  if (!ensure_space(ctx, b, ix + ctx.indentation_level + write_padding_bytes)) [[unlikely]] {
+                  if (!ensure_space(ctx, b, ix + ctx.depth + write_padding_bytes)) [[unlikely]] {
                      return;
                   }
 
-                  if constexpr (Opts.new_lines_in_arrays) {
+                  if constexpr (check_new_lines_in_arrays(Opts)) {
                      std::memcpy(&b[ix], "[\n", 2);
                      ix += 2;
-                     std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                     ix += ctx.indentation_level;
+                     std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                     ix += ctx.depth;
                   }
                   else {
                      std::memcpy(&b[ix], "[", 1);
@@ -1318,7 +1342,7 @@ namespace glz
                for (const auto fin = std::end(value); it != fin; ++it) {
                   if constexpr (required_padding<val_t>()) {
                      if constexpr (Opts.prettify) {
-                        if (!ensure_space(ctx, b, ix + ctx.indentation_level + write_padding_bytes)) [[unlikely]] {
+                        if (!ensure_space(ctx, b, ix + ctx.depth + write_padding_bytes)) [[unlikely]] {
                            return;
                         }
                      }
@@ -1329,11 +1353,11 @@ namespace glz
                      }
 
                      if constexpr (Opts.prettify) {
-                        if constexpr (Opts.new_lines_in_arrays) {
+                        if constexpr (check_new_lines_in_arrays(Opts)) {
                            std::memcpy(&b[ix], ",\n", 2);
                            ix += 2;
-                           std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                           ix += ctx.indentation_level;
+                           std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                           ix += ctx.depth;
                         }
                         else {
                            std::memcpy(&b[ix], ", ", 2);
@@ -1358,9 +1382,9 @@ namespace glz
                      }
                   }
                }
-               if constexpr (Opts.prettify && Opts.new_lines_in_arrays) {
-                  ctx.indentation_level -= Opts.indentation_width;
-                  dump_newline_indent(Opts.indentation_char, ctx.indentation_level, b, ix);
+               if constexpr (Opts.prettify && check_new_lines_in_arrays(Opts)) {
+                  ctx.depth -= check_indentation_width(Opts);
+                  dump_newline_indent(check_indentation_char(Opts), ctx.depth, b, ix);
                }
 
                dump(']', b, ix);
@@ -1379,20 +1403,20 @@ namespace glz
          if (!empty_range(value)) {
             if constexpr (!check_opening_handled(Opts)) {
                if constexpr (Opts.prettify) {
-                  ctx.indentation_level += Opts.indentation_width;
-                  if (!ensure_space(ctx, b, ix + ctx.indentation_level + write_padding_bytes)) [[unlikely]] {
+                  ctx.depth += check_indentation_width(Opts);
+                  if (!ensure_space(ctx, b, ix + ctx.depth + write_padding_bytes)) [[unlikely]] {
                      return;
                   }
                   std::memcpy(&b[ix], "\n", 1);
                   ++ix;
-                  std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                  ix += ctx.indentation_level;
+                  std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                  ix += ctx.depth;
                }
             }
 
             using val_t = detail::iterator_second_type<T>; // the type of value in each [key, value] pair
-            constexpr bool write_member_functions = check_write_member_functions(Opts);
-            if constexpr (!always_skipped<val_t> && (write_member_functions || !is_member_function_pointer<val_t>)) {
+            constexpr bool write_function_pointers = check_write_function_pointers(Opts);
+            if constexpr (!always_skipped<val_t> && (write_function_pointers || !is_any_function_ptr<val_t>)) {
                if constexpr (null_t<val_t> && Opts.skip_null_members) {
                   auto write_first_entry = [&](auto&& it) {
                      auto&& [key, entry_val] = *it;
@@ -1455,14 +1479,14 @@ namespace glz
 
             if constexpr (!check_closing_handled(Opts)) {
                if constexpr (Opts.prettify) {
-                  ctx.indentation_level -= Opts.indentation_width;
-                  if (!ensure_space(ctx, b, ix + ctx.indentation_level + write_padding_bytes)) [[unlikely]] {
+                  ctx.depth -= check_indentation_width(Opts);
+                  if (!ensure_space(ctx, b, ix + ctx.depth + write_padding_bytes)) [[unlikely]] {
                      return;
                   }
                   std::memcpy(&b[ix], "\n", 1);
                   ++ix;
-                  std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                  ix += ctx.indentation_level;
+                  std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                  ix += ctx.depth;
                }
             }
          }
@@ -1485,13 +1509,13 @@ namespace glz
          }
 
          if constexpr (Opts.prettify) {
-            ctx.indentation_level += Opts.indentation_width;
-            if (!ensure_space(ctx, b, ix + ctx.indentation_level + 2)) [[unlikely]] {
+            ctx.depth += check_indentation_width(Opts);
+            if (!ensure_space(ctx, b, ix + ctx.depth + 2)) [[unlikely]] {
                return;
             }
             dump<false>("{\n", b, ix);
-            std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-            ix += ctx.indentation_level;
+            std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+            ix += ctx.depth;
          }
          else {
             dump('{', b, ix);
@@ -1503,8 +1527,8 @@ namespace glz
          }
 
          if constexpr (Opts.prettify) {
-            ctx.indentation_level -= Opts.indentation_width;
-            dump_newline_indent(Opts.indentation_char, ctx.indentation_level, b, ix);
+            ctx.depth -= check_indentation_width(Opts);
+            dump_newline_indent(check_indentation_char(Opts), ctx.depth, b, ix);
             dump<false>('}', b, ix);
          }
          else {
@@ -1520,7 +1544,12 @@ namespace glz
       GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, Args&&... args)
       {
          if (value) {
-            serialize<JSON>::op<Opts>(*value, ctx, std::forward<Args>(args)...);
+            if constexpr (not std::is_void_v<decltype(*value)>) {
+               serialize<JSON>::op<Opts>(*value, ctx, std::forward<Args>(args)...);
+            }
+            else {
+               dump("{}", std::forward<Args>(args)...);
+            }
          }
          else {
             serialize<JSON>::op<Opts>(unexpected_wrapper{&value.error()}, ctx, std::forward<Args>(args)...);
@@ -1543,6 +1572,18 @@ namespace glz
    template <nullable_like T>
    struct to<JSON, T>
    {
+      static constexpr bool can_error = [] {
+         if constexpr (has_value_type<T>) {
+            return write_can_error<typename T::value_type>();
+         }
+         else if constexpr (has_element_type<T>) {
+            return write_can_error<typename T::element_type>();
+         }
+         else {
+            return false;
+         }
+      }();
+
       template <auto Opts>
       GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, auto&& b, auto& ix)
       {
@@ -1579,6 +1620,8 @@ namespace glz
    template <always_null_t T>
    struct to<JSON, T>
    {
+      static constexpr bool can_error = false;
+
       template <auto Opts, class B>
       GLZ_ALWAYS_INLINE static void op(auto&&, is_context auto&&, B&& b, auto& ix)
       {
@@ -1624,8 +1667,8 @@ namespace glz
                   // must first write out type
                   if constexpr (Opts.prettify) {
                      dump("{\n", b, ix);
-                     ctx.indentation_level += Opts.indentation_width;
-                     dumpn(Opts.indentation_char, ctx.indentation_level, b, ix);
+                     ctx.depth += check_indentation_width(Opts);
+                     dumpn(check_indentation_char(Opts), ctx.depth, b, ix);
                      dump('"', b, ix);
                      dump_maybe_empty(tag_v<T>, b, ix);
 
@@ -1636,7 +1679,7 @@ namespace glz
                         serialize<JSON>::op<Opts>(ids_v<T>[value.index()], ctx, b, ix);
                         if constexpr (N > 0) {
                            dump(",\n", b, ix);
-                           dumpn(Opts.indentation_char, ctx.indentation_level, b, ix);
+                           dumpn(check_indentation_char(Opts), ctx.depth, b, ix);
                         }
                      }
                      else {
@@ -1647,7 +1690,7 @@ namespace glz
                         }
                         else {
                            dump("\",\n", b, ix);
-                           dumpn(Opts.indentation_char, ctx.indentation_level, b, ix);
+                           dumpn(check_indentation_char(Opts), ctx.depth, b, ix);
                         }
                      }
                   }
@@ -1693,14 +1736,14 @@ namespace glz
                   }
 
                   if constexpr (Opts.prettify) {
-                     ctx.indentation_level -= Opts.indentation_width;
-                     if (!ensure_space(ctx, b, ix + ctx.indentation_level + write_padding_bytes)) [[unlikely]] {
+                     ctx.depth -= check_indentation_width(Opts);
+                     if (!ensure_space(ctx, b, ix + ctx.depth + write_padding_bytes)) [[unlikely]] {
                         return;
                      }
                      std::memcpy(&b[ix], "\n", 1);
                      ++ix;
-                     std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                     ix += ctx.indentation_level;
+                     std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                     ix += ctx.depth;
                      std::memcpy(&b[ix], "}", 1);
                      ++ix;
                   }
@@ -1725,19 +1768,19 @@ namespace glz
          auto& value = wrapper.value;
          dump('[', args...);
          if constexpr (Opts.prettify) {
-            ctx.indentation_level += Opts.indentation_width;
-            dump_newline_indent(Opts.indentation_char, ctx.indentation_level, args...);
+            ctx.depth += check_indentation_width(Opts);
+            dump_newline_indent(check_indentation_char(Opts), ctx.depth, args...);
          }
          dump('"', args...);
          dump_maybe_empty(ids_v<T>[value.index()], args...);
          dump("\",", args...);
          if constexpr (Opts.prettify) {
-            dump_newline_indent(Opts.indentation_char, ctx.indentation_level, args...);
+            dump_newline_indent(check_indentation_char(Opts), ctx.depth, args...);
          }
          std::visit([&](auto&& v) { serialize<JSON>::op<Opts>(v, ctx, args...); }, value);
          if constexpr (Opts.prettify) {
-            ctx.indentation_level -= Opts.indentation_width;
-            dump_newline_indent(Opts.indentation_char, ctx.indentation_level, args...);
+            ctx.depth -= check_indentation_width(Opts);
+            dump_newline_indent(check_indentation_char(Opts), ctx.depth, args...);
          }
          dump(']', args...);
       }
@@ -1755,9 +1798,9 @@ namespace glz
 
          dump('[', args...);
          if constexpr (N > 0 && Opts.prettify) {
-            if constexpr (Opts.new_lines_in_arrays) {
-               ctx.indentation_level += Opts.indentation_width;
-               dump_newline_indent(Opts.indentation_char, ctx.indentation_level, args...);
+            if constexpr (check_new_lines_in_arrays(Opts)) {
+               ctx.depth += check_indentation_width(Opts);
+               dump_newline_indent(check_indentation_char(Opts), ctx.depth, args...);
             }
          }
          for_each<N>([&]<size_t I>() {
@@ -1773,9 +1816,9 @@ namespace glz
             }
          });
          if constexpr (N > 0 && Opts.prettify) {
-            if constexpr (Opts.new_lines_in_arrays) {
-               ctx.indentation_level -= Opts.indentation_width;
-               dump_newline_indent(Opts.indentation_char, ctx.indentation_level, args...);
+            if constexpr (check_new_lines_in_arrays(Opts)) {
+               ctx.depth -= check_indentation_width(Opts);
+               dump_newline_indent(check_indentation_char(Opts), ctx.depth, args...);
             }
          }
          dump(']', args...);
@@ -1800,9 +1843,9 @@ namespace glz
 
          dump('[', args...);
          if constexpr (N > 0 && Opts.prettify) {
-            if constexpr (Opts.new_lines_in_arrays) {
-               ctx.indentation_level += Opts.indentation_width;
-               dump_newline_indent(Opts.indentation_char, ctx.indentation_level, args...);
+            if constexpr (check_new_lines_in_arrays(Opts)) {
+               ctx.depth += check_indentation_width(Opts);
+               dump_newline_indent(check_indentation_char(Opts), ctx.depth, args...);
             }
          }
          using V = std::decay_t<T>;
@@ -1824,9 +1867,9 @@ namespace glz
             }
          });
          if constexpr (N > 0 && Opts.prettify) {
-            if constexpr (Opts.new_lines_in_arrays) {
-               ctx.indentation_level -= Opts.indentation_width;
-               dump_newline_indent(Opts.indentation_char, ctx.indentation_level, args...);
+            if constexpr (check_new_lines_in_arrays(Opts)) {
+               ctx.depth -= check_indentation_width(Opts);
+               dump_newline_indent(check_indentation_char(Opts), ctx.depth, args...);
             }
          }
          dump(']', args...);
@@ -1862,9 +1905,9 @@ namespace glz
          if constexpr (!check_opening_handled(Options)) {
             dump('{', b, ix);
             if constexpr (Options.prettify) {
-               ctx.indentation_level += Options.indentation_width;
+               ctx.depth += check_indentation_width(Options);
                dump('\n', b, ix);
-               dumpn(Options.indentation_char, ctx.indentation_level, b, ix);
+               dumpn(check_indentation_char(Options), ctx.depth, b, ix);
             }
          }
 
@@ -1882,8 +1925,8 @@ namespace glz
             }
 
             // skip
-            constexpr bool write_member_functions = check_write_member_functions(Opts);
-            if constexpr (always_skipped<val_t> || (!write_member_functions && is_member_function_pointer<val_t>)) {
+            constexpr bool write_function_pointers = check_write_function_pointers(Opts);
+            if constexpr (always_skipped<val_t> || (!write_function_pointers && is_any_function_ptr<val_t>)) {
                return;
             }
             else {
@@ -1918,9 +1961,9 @@ namespace glz
 
          if constexpr (!check_closing_handled(Options)) {
             if constexpr (Options.prettify) {
-               ctx.indentation_level -= Options.indentation_width;
+               ctx.depth -= check_indentation_width(Options);
                dump('\n', b, ix);
-               dumpn(Options.indentation_char, ctx.indentation_level, b, ix);
+               dumpn(check_indentation_char(Options), ctx.depth, b, ix);
             }
             dump('}', b, ix);
          }
@@ -1937,9 +1980,9 @@ namespace glz
          if constexpr (!check_opening_handled(Options)) {
             dump('{', b, ix);
             if constexpr (Options.prettify) {
-               ctx.indentation_level += Options.indentation_width;
+               ctx.depth += check_indentation_width(Options);
                dump('\n', b, ix);
-               dumpn(Options.indentation_char, ctx.indentation_level, b, ix);
+               dumpn(check_indentation_char(Options), ctx.depth, b, ix);
             }
          }
 
@@ -1968,43 +2011,30 @@ namespace glz
          }
 
          if constexpr (Options.prettify) {
-            ctx.indentation_level -= Options.indentation_width;
+            ctx.depth -= check_indentation_width(Options);
             dump('\n', b, ix);
-            dumpn(Options.indentation_char, ctx.indentation_level, b, ix);
+            dumpn(check_indentation_char(Options), ctx.depth, b, ix);
          }
          dump('}', b, ix);
       }
    };
 
-   // Only use this if you are not prettifying
-   // Returns zero if the fixed size cannot be determined
-   template <class T>
-   inline constexpr size_t fixed_padding = [] {
-      constexpr auto N = reflect<T>::size;
-      size_t fixed = 2 + 16; // {} + extra padding
-      for_each_short_circuit<N>([&]<auto I>() -> bool {
-         using val_t = field_t<T, I>;
-         if constexpr (required_padding<val_t>()) {
-            fixed += required_padding<val_t>();
-            fixed += reflect<T>::keys[I].size() + 2; // quoted key length
-            fixed += 2; // colon and comma
-            return false; // continue
-         }
-         else {
-            fixed = 0;
-            return true; // break
-         }
-      });
-      if (fixed) {
-         fixed = round_up_to_nearest_16(fixed);
-      }
-      return fixed;
-   }();
-
    template <class T>
       requires((glaze_object_t<T> || reflectable<T>) && not custom_write<T>)
    struct to<JSON, T>
    {
+      static constexpr bool can_error = [] {
+         constexpr auto N = reflect<T>::size;
+         if constexpr (N == 0) {
+            return false;
+         }
+         else {
+            return []<size_t... I>(std::index_sequence<I...>) {
+               return (write_can_error<field_t<T, I>>() || ...);
+            }(std::make_index_sequence<N>{});
+         }
+      }();
+
       template <auto Options, class V, class B>
          requires(not std::is_pointer_v<std::remove_cvref_t<V>>)
       static void op(V&& value, is_context auto&& ctx, B&& b, auto& ix)
@@ -2047,20 +2077,24 @@ namespace glz
 
             if constexpr (not check_opening_handled(Options)) {
                if constexpr (Options.prettify) {
-                  ctx.indentation_level += Options.indentation_width;
-                  if (!ensure_space(ctx, b, ix + ctx.indentation_level + write_padding_bytes)) [[unlikely]] {
-                     return;
+                  ctx.depth += check_indentation_width(Options);
+                  if constexpr (not check_write_unchecked(Options)) {
+                     if (!ensure_space(ctx, b, ix + ctx.depth + write_padding_bytes)) [[unlikely]] {
+                        return;
+                     }
                   }
                   std::memcpy(&b[ix], "{\n", 2);
                   ix += 2;
-                  std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                  ix += ctx.indentation_level;
+                  std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                  ix += ctx.depth;
                }
                else {
-                  if (!ensure_space(ctx, b, ix + 1)) [[unlikely]] {
-                     return;
+                  if constexpr (not check_write_unchecked(Options)) {
+                     if (!ensure_space(ctx, b, ix + 1)) [[unlikely]] {
+                        return;
+                     }
                   }
-                  dump('{', b, ix);
+                  dump<not check_write_unchecked(Options)>('{', b, ix);
                }
             }
 
@@ -2099,9 +2133,8 @@ namespace glz
                      if (meta<T>::skip_if(field_value, key, mctx)) return;
                   }
 
-                  constexpr bool write_member_functions = check_write_member_functions(Opts);
-                  if constexpr (always_skipped<val_t> ||
-                                (!write_member_functions && is_member_function_pointer<val_t>)) {
+                  constexpr bool write_function_pointers = check_write_function_pointers(Opts);
+                  if constexpr (always_skipped<val_t> || (!write_function_pointers && is_any_function_ptr<val_t>)) {
                      return;
                   }
                   else {
@@ -2134,7 +2167,7 @@ namespace glz
                      }
 
                      if constexpr (Opts.prettify) {
-                        if (!ensure_space(ctx, b, ix + padding + ctx.indentation_level)) [[unlikely]] {
+                        if (!ensure_space(ctx, b, ix + padding + ctx.depth)) [[unlikely]] {
                            return;
                         }
                      }
@@ -2152,8 +2185,8 @@ namespace glz
                         if constexpr (Opts.prettify) {
                            std::memcpy(&b[ix], ",\n", 2);
                            ix += 2;
-                           std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                           ix += ctx.indentation_level;
+                           std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                           ix += ctx.depth;
                         }
                         else {
                            std::memcpy(&b[ix], ",", 1);
@@ -2184,19 +2217,21 @@ namespace glz
             }
             else {
                static constexpr size_t fixed_max_size = fixed_padding<T>;
-               if constexpr (fixed_max_size) {
+               if constexpr (fixed_max_size && not check_write_unchecked(Options)) {
                   if (!ensure_space(ctx, b, ix + fixed_max_size)) [[unlikely]] {
                      return;
                   }
                }
 
                for_each<N>([&]<size_t I>() {
-                  if (bool(ctx.error)) [[unlikely]] {
-                     return;
+                  if constexpr (write_can_error<T>()) {
+                     if (bool(ctx.error)) [[unlikely]] {
+                        return;
+                     }
                   }
                   if constexpr (not fixed_max_size) {
                      if constexpr (Opts.prettify) {
-                        if (!ensure_space(ctx, b, ix + padding + ctx.indentation_level)) [[unlikely]] {
+                        if (!ensure_space(ctx, b, ix + padding + ctx.depth)) [[unlikely]] {
                            return;
                         }
                      }
@@ -2210,8 +2245,8 @@ namespace glz
                   if constexpr (I != 0 && Opts.prettify) {
                      std::memcpy(&b[ix], ",\n", 2);
                      ix += 2;
-                     std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                     ix += ctx.indentation_level;
+                     std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                     ix += ctx.depth;
                   }
 
                   using val_t = field_t<T, I>;
@@ -2261,19 +2296,21 @@ namespace glz
             // Options is required here, because it must be the top level
             if constexpr (not check_closing_handled(Options)) {
                if constexpr (Options.prettify) {
-                  ctx.indentation_level -= Options.indentation_width;
-                  if (!ensure_space(ctx, b, ix + ctx.indentation_level + write_padding_bytes)) [[unlikely]] {
-                     return;
+                  ctx.depth -= check_indentation_width(Options);
+                  if constexpr (not check_write_unchecked(Options)) {
+                     if (!ensure_space(ctx, b, ix + ctx.depth + write_padding_bytes)) [[unlikely]] {
+                        return;
+                     }
                   }
                   std::memcpy(&b[ix], "\n", 1);
                   ++ix;
-                  std::memset(&b[ix], Opts.indentation_char, ctx.indentation_level);
-                  ix += ctx.indentation_level;
+                  std::memset(&b[ix], check_indentation_char(Opts), ctx.depth);
+                  ix += ctx.depth;
                   std::memcpy(&b[ix], "}", 1);
                   ++ix;
                }
                else {
-                  dump('}', b, ix);
+                  dump<not(fixed_padding<T> || check_write_unchecked(Options))>('}', b, ix);
                }
             }
          }
@@ -2355,7 +2392,7 @@ namespace glz
             ix += N;
          };
 
-         if constexpr (not Opts.raw) {
+         if constexpr (not check_unquoted(Opts)) {
             b[ix++] = '"';
          }
          write_digits.template operator()<4>(static_cast<uint64_t>(yr));
@@ -2386,7 +2423,7 @@ namespace glz
          }
 
          b[ix++] = 'Z';
-         if constexpr (not Opts.raw) {
+         if constexpr (not check_unquoted(Opts)) {
             b[ix++] = '"';
          }
       }

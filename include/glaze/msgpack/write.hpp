@@ -633,7 +633,7 @@ namespace glz
       template <auto Opts, class Value, is_context Ctx, class B, class IX>
       GLZ_ALWAYS_INLINE static void op(Value&& value, Ctx&& ctx, B&& b, IX&& ix)
       {
-         if constexpr (Opts.structs_as_arrays) {
+         if constexpr (check_structs_as_arrays(Opts)) {
             if (!msgpack::detail::write_array_header(ctx, count_members<Opts>(), b, ix)) [[unlikely]] {
                return;
             }
@@ -708,6 +708,10 @@ namespace glz
       }
    };
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4702) // unreachable code from if constexpr
+#endif
    template <writable_array_t T>
    struct to<MSGPACK, T>
    {
@@ -740,6 +744,9 @@ namespace glz
             }
          }
       }
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
    };
 
    template <>

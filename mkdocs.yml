@@ -86,8 +86,10 @@ nav:
    - MessagePack: msgpack.md
    - Stencil/Mustache: stencil-mustache.md
    - TOML: toml.md
+   - YAML: yaml.md
    - EETF: EETF/erlang-external-term-format.md
  - Serialization/Parsing:
+   - Automatic Enum Strings: enum-reflection.md
    - Exceptions: exceptions.md
    - Wrappers: wrappers.md
    - Custom Wrappers: custom-wrappers.md
@@ -115,6 +117,7 @@ nav:
    - networking/http-rest-support.md
    - networking/http-server.md
    - networking/http-router.md
+   - networking/url.md
    - networking/rest-registry.md
    - networking/tls-support.md
    - networking/http-client.md

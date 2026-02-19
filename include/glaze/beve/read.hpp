@@ -1404,6 +1404,99 @@ namespace glz
       }
    };
 
+   template <is_expected T>
+   struct from<BEVE, T> final
+   {
+      template <auto Opts>
+      static void op(auto&& value, is_context auto&& ctx, auto&& it, auto end)
+      {
+         constexpr uint8_t object_header = tag::object; // string keys
+
+         if (invalid_end(ctx, it, end)) {
+            return;
+         }
+
+         auto parse_val = [&] {
+            if constexpr (not std::is_void_v<typename std::decay_t<T>::value_type>) {
+               if (value) {
+                  parse<BEVE>::op<Opts>(*value, ctx, it, end);
+               }
+               else {
+                  value.emplace();
+                  parse<BEVE>::op<Opts>(*value, ctx, it, end);
+               }
+            }
+            else {
+               value.emplace();
+            }
+         };
+
+         const auto tag = uint8_t(*it);
+         if ((tag & 0b111) == object_header) {
+            auto start = it;
+            ++it;
+
+            const auto n_keys = int_from_compressed(ctx, it, end);
+            if (bool(ctx.error)) [[unlikely]] {
+               return;
+            }
+
+            if (n_keys == 0) {
+               // empty object
+               if constexpr (std::is_void_v<typename std::decay_t<T>::value_type>) {
+                  value.emplace();
+               }
+               else {
+                  // rewind and parse as value (the value type might be an empty object)
+                  it = start;
+                  parse_val();
+               }
+            }
+            else if (n_keys == 1) {
+               // could be unexpected wrapper or a single-field object value
+               const auto key_len = int_from_compressed(ctx, it, end);
+               if (bool(ctx.error)) [[unlikely]] {
+                  return;
+               }
+
+               static constexpr sv unexpected_key = "unexpected";
+               if (key_len == unexpected_key.size() && uint64_t(end - it) >= key_len) {
+                  if (std::memcmp(it, unexpected_key.data(), key_len) == 0) {
+                     // this is an unexpected wrapper
+                     it += key_len;
+
+                     using error_type = typename std::decay_t<T>::error_type;
+                     if (!value) {
+                        parse<BEVE>::op<Opts>(value.error(), ctx, it, end);
+                     }
+                     else {
+                        std::decay_t<error_type> error{};
+                        parse<BEVE>::op<Opts>(error, ctx, it, end);
+                        if (bool(ctx.error)) [[unlikely]] {
+                           return;
+                        }
+                        value = glz::unexpected(std::move(error));
+                     }
+                     return;
+                  }
+               }
+               // not an unexpected wrapper, rewind and parse as value
+               it = start;
+               parse_val();
+            }
+            else {
+               // multiple keys, must be a value object
+               it = start;
+               parse_val();
+            }
+         }
+         else {
+            // not an object, parse as value directly
+            parse_val();
+         }
+      }
+   };
+
    template <nullable_t T>
       requires(std::is_array_v<T>)
    struct from<BEVE, T> final
@@ -1416,7 +1509,7 @@ namespace glz
    };
 
    template <nullable_t T>
-      requires(!std::is_array_v<T>)
+      requires(!std::is_array_v<T> && not is_expected<T>)
    struct from<BEVE, T> final
    {
       template <auto Opts>
@@ -1526,12 +1619,16 @@ namespace glz
       }
    };
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4702) // unreachable code from if constexpr
+#endif
    template <class T>
       requires((glaze_object_t<T> || reflectable<T>) && not custom_read<T>)
    struct from<BEVE, T> final
    {
       template <auto Opts>
-         requires(Opts.structs_as_arrays == true)
+         requires(check_structs_as_arrays(Opts) == true)
       static void op(auto&& value, is_context auto&& ctx, auto&& it, auto end)
       {
          if constexpr (reflectable<T>) {
@@ -1582,7 +1679,7 @@ namespace glz
       }
 
       template <auto Opts>
-         requires(Opts.structs_as_arrays == false)
+         requires(check_structs_as_arrays(Opts) == false)
       static void op(auto&& value, is_context auto&& ctx, auto&& it, auto end)
       {
          constexpr uint8_t type = 0; // string key
@@ -1600,6 +1697,9 @@ namespace glz
          ++it;
 
          static constexpr auto N = reflect<T>::size;
+         if constexpr (N == 0) {
+            (void)value;
+         }
 
          static constexpr bit_array<N> all_fields = [] {
             bit_array<N> arr{};
@@ -1732,6 +1832,9 @@ namespace glz
          }
       }
    };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
    template <class T>
       requires glaze_array_t<T>
@@ -1880,8 +1983,8 @@ namespace glz
    [[deprecated("Use read_beve_untagged instead")]] [[nodiscard]] inline error_ctx read_binary_untagged(T&& value,
                                                                                                         Buffer&& buffer)
    {
-      return read<opts{.format = BEVE, .structs_as_arrays = true}>(std::forward<T>(value),
-                                                                   std::forward<Buffer>(buffer));
+      return read<opt_true<opts{.format = BEVE}, structs_as_arrays_opt_tag{}>>(std::forward<T>(value),
+                                                                               std::forward<Buffer>(buffer));
    }
 
    template <read_supported<BEVE> T, class Buffer>
@@ -1889,7 +1992,8 @@ namespace glz
       Buffer&& buffer)
    {
       T value{};
-      const auto pe = read<opts{.format = BEVE, .structs_as_arrays = true}>(value, std::forward<Buffer>(buffer));
+      const auto pe =
+         read<opt_true<opts{.format = BEVE}, structs_as_arrays_opt_tag{}>>(value, std::forward<Buffer>(buffer));
       if (pe) [[unlikely]] {
          return unexpected(pe);
       }
@@ -1900,15 +2004,16 @@ namespace glz
    template <read_supported<BEVE> T, class Buffer>
    [[nodiscard]] inline error_ctx read_beve_untagged(T&& value, Buffer&& buffer)
    {
-      return read<opts{.format = BEVE, .structs_as_arrays = true}>(std::forward<T>(value),
-                                                                   std::forward<Buffer>(buffer));
+      return read<opt_true<opts{.format = BEVE}, structs_as_arrays_opt_tag{}>>(std::forward<T>(value),
+                                                                               std::forward<Buffer>(buffer));
    }
 
    template <read_supported<BEVE> T, class Buffer>
    [[nodiscard]] inline expected<T, error_ctx> read_beve_untagged(Buffer&& buffer)
    {
       T value{};
-      const auto pe = read<opts{.format = BEVE, .structs_as_arrays = true}>(value, std::forward<Buffer>(buffer));
+      const auto pe =
+         read<opt_true<opts{.format = BEVE}, structs_as_arrays_opt_tag{}>>(value, std::forward<Buffer>(buffer));
       if (pe) [[unlikely]] {
          return unexpected(pe);
       }
@@ -1918,7 +2023,7 @@ namespace glz
    template <auto Opts = opts{}, read_supported<BEVE> T>
    [[nodiscard]] inline error_ctx read_file_beve_untagged(T& value, const std::string& file_name, auto&& buffer)
    {
-      return read_file_beve<opt_true<Opts, &opts::structs_as_arrays>>(value, file_name, buffer);
+      return read_file_beve<opt_true<Opts, structs_as_arrays_opt_tag{}>>(value, file_name, buffer);
    }
 
    // ===== Delimited BEVE support for multiple objects in one buffer =====

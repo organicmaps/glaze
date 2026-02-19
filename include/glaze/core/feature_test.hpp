@@ -21,6 +21,67 @@ namespace glz
 
 // Glaze Feature Test Macros for breaking changes
 
+// v7.0.1 moves std::error_code integration to separate optional header
+//
+// The glaze_error_category struct, error_category global, and make_error_code() function
+// are now in <glaze/core/std_error_code.hpp> instead of being included by default.
+//
+// This reduces binary size by ~34KB for users who don't need std::error_code integration.
+// The overhead comes from the global error_category variable with std::error_category vtable
+// which forces a DATA segment with page alignment overhead.
+//
+// To restore std::error_code integration, include:
+//   #include <glaze/core/std_error_code.hpp>
+#define glaze_v7_0_1_std_error_code_header
+
+// v7.0.0 renames write_member_functions to write_function_pointers
+//
+// Options:
+// - 'write_member_functions' renamed to 'write_function_pointers'
+// - This option now controls serialization of both member and non-member function pointers
+// - check_write_member_functions() renamed to check_write_function_pointers()
+//
+// context struct:
+// - 'indentation_level' renamed to 'depth'
+// - This field tracks nesting depth of structures (objects/arrays)
+// - Used for indentation when writing and stack overflow protection when reading
+//
+// is_context concept:
+// - Now checks for 'depth' member instead of 'indentation_level'
+#define glaze_v7_0_0_write_function_pointers
+#define glaze_v7_0_0_depth
+
+// v7.0.0 moves additional options out of glz::opts to inheritable options pattern
+//
+// Options moved out of glz::opts (use custom opts struct or opt tags in glz::meta):
+// - 'quoted_num' - treat numbers as quoted strings
+// - 'raw_string' - skip escape sequence processing for strings
+// - 'structs_as_arrays' - serialize structs as arrays without field keys
+//
+// Options renamed AND moved out of glz::opts:
+// - 'raw' renamed to 'unquoted' - write string values without surrounding quotes
+// - 'number' renamed to 'string_as_number' - treat string types as numbers
+//
+// Wrapper aliases glz::raw and glz::number are deprecated (use glz::unquoted and glz::string_as_number)
+//
+// Migration for custom opts structs:
+//   // OLD:
+//   struct my_opts : glz::opts { bool raw = true; bool number = true; };
+//   // NEW:
+//   struct my_opts : glz::opts { bool unquoted = true; bool string_as_number = true; };
+//
+// New opt tags for glz::meta:
+// - glz::quoted_num_opt_tag
+// - glz::string_as_number_opt_tag (replaces number semantics)
+// - glz::unquoted_opt_tag (replaces raw semantics)
+// - glz::raw_string_opt_tag
+// - glz::structs_as_arrays_opt_tag
+#define glaze_v7_0_0_opts_quoted_num
+#define glaze_v7_0_0_opts_string_as_number
+#define glaze_v7_0_0_opts_unquoted
+#define glaze_v7_0_0_opts_raw_string
+#define glaze_v7_0_0_opts_structs_as_arrays
+
 // v6.5.0 unified error_ctx and streaming I/O support
 //
 // error_ctx struct:

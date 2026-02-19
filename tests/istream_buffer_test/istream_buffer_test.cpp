@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -2753,7 +2754,11 @@ suite json_stream_reader_edge_cases = [] {
 // ============================================================================
 
 // Helper to create temp file path
-inline std::string temp_file_path(const std::string& name) { return "/tmp/glaze_streaming_test_" + name; }
+inline std::string temp_file_path(const std::string& name)
+{
+   namespace fs = std::filesystem;
+   return (fs::temp_directory_path() / ("glaze_streaming_test_" + name)).string();
+}
 
 suite file_io_streaming_tests = [] {
    "write JSON to file then read back"_test = [] {
@@ -3573,7 +3578,7 @@ suite streaming_state_unit_tests = [] {
 
       // Should have all context members
       ctx.error = glz::error_code::none;
-      ctx.indentation_level = 0;
+      ctx.depth = 0;
 
       // Plus streaming state
       expect(!ctx.stream.enabled()); // Not initialized

@@ -8,11 +8,33 @@ Building with optimizations is the most important for performance: `-O2` or `-O3
 
 Use `-march=native` if you will be running your executable on the build platform.
 
-The Glaze CMake has the option `glaze_ENABLE_AVX2`. This will attempt to use `AVX2` SIMD instructions in some cases to improve performance, as long as the system you are configuring on supports it. Set this option to `OFF` to disable the AVX2 instruction set, such as if you are cross-compiling for Arm. If you aren't using CMake, the macro `GLZ_USE_AVX2` enables the feature if defined.
+### SIMD Architecture Flags
+
+Glaze automatically detects the target architecture using compiler-predefined macros and defines the appropriate SIMD flags:
+
+| Flag | Detected When | Architecture |
+|------|--------------|--------------|
+| `GLZ_USE_SSE2` | `__x86_64__` or `_M_X64` | x86-64 (always has SSE2) |
+| `GLZ_USE_AVX2` | `__AVX2__` (in addition to x86-64) | x86-64 with AVX2 |
+| `GLZ_USE_NEON` | `__aarch64__`, `_M_ARM64`, or `__ARM_NEON` | ARM64 / AArch64 |
+
+These macros are set by the compiler based on the target architecture, so they work correctly when cross-compiling (e.g., an x86 host building for ARM will not define `__x86_64__`).
+
+When AVX2 is available, both `GLZ_USE_SSE2` and `GLZ_USE_AVX2` are defined. The AVX2 path handles 32-byte chunks, then the SSE2 path handles 16-byte remainders.
+
+### Disabling SIMD
+
+To disable all SIMD intrinsics, use the CMake option:
+
+```cmake
+set(glaze_DISABLE_SIMD_WHEN_SUPPORTED ON)
+```
+
+This sets the `GLZ_DISABLE_SIMD` compile definition as an INTERFACE property, so it automatically propagates to all targets that link against `glaze::glaze`. If you aren't using CMake, define `GLZ_DISABLE_SIMD` before including Glaze headers.
 
 > [!NOTE]
 >
-> Glaze uses SIMD Within A Resgister (SWAR) for most optimizations, which are fully cross-platform and does not require any SIMD instrisics or special compiler flags. So, SIMD flags don't usually have a large impact with Glaze.
+> Glaze uses SIMD Within A Register (SWAR) for most optimizations, which are fully cross-platform and do not require any SIMD intrinsics or special compiler flags. SIMD intrinsics are used for specific hot paths (e.g., JSON string escaping), so disabling them typically has a modest impact on overall performance.
 
 ## Reducing Compilation Time
 

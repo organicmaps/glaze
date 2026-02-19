@@ -172,11 +172,11 @@ struct glz::meta<Person> {
 // JSON output: {"full_name":"John","years_old":30,"interests":["reading"]}
 ```
 
-### Member Function Pointers in Metadata
+### Function Pointers in Metadata
 
-When a `glz::meta` definition references a member function (for example, to expose a computed field), Glaze skips that entry during JSON writes by default. This prevents unintentionally emitting empty values for callables.
+When a `glz::meta` definition references a function pointer (member or non-member), Glaze skips that entry during JSON writes by default. This prevents unintentionally emitting empty values for callables.
 
-If you want the key to be emitted—you can opt back in by supplying a custom options type with `write_member_functions = true`:
+If you want the key to be emitted—you can opt back in by supplying a custom options type with `write_function_pointers = true`:
 
 ## Error Handling
 
@@ -293,7 +293,7 @@ struct glz::meta<Status> {
 
 > [!TIP]
 >
-> For automatic enum-to-string serialization without writing metadata, consider using [simple_enum](https://github.com/arturbac/simple_enum), which provides Glaze integration.
+> For automatic enum-to-string serialization without writing metadata for each enum, see [Automatic Enum Strings](enum-reflection.md).
 
 ### Variants
 

@@ -21,15 +21,7 @@ The tables below list **all** compile time options, organized by category:
 | `bool skip_null_members` | `true` | Skip writing out members if their value is null |
 | `bool prettify` | `false` | Write out prettified JSON |
 | `bool minified` | `false` | Require minified input for faster read performance |
-| `char indentation_char` | `' '` | Prettified JSON indentation character |
-| `uint8_t indentation_width` | `3` | Prettified JSON indentation size |
-| `bool new_lines_in_arrays` | `true` | Whether prettified arrays have new lines per element |
 | `bool error_on_missing_keys` | `false` | Require all non-nullable keys to be present |
-| `bool quoted_num` | `false` | Treat numbers as quoted or arrays as having quoted numbers |
-| `bool number` | `false` | Treat string-like types as numbers |
-| `bool raw` | `false` | Write string-like values without quotes |
-| `bool raw_string` | `false` | Skip escape sequence encoding/decoding for strings |
-| `bool structs_as_arrays` | `false` | Handle structs without keys (as arrays) |
 | `bool partial_read` | `false` | Exit after reading the deepest structural object |
 
 ### Inheritable Options
@@ -38,10 +30,15 @@ These options are **not** in `glz::opts` by default. Add them to a custom option
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `bool quoted_num` | `false` | Treat numbers as quoted strings |
+| `bool string_as_number` | `false` | Treat string-like types as numbers |
+| `bool unquoted` | `false` | Write string-like values without quotes |
+| `bool raw_string` | `false` | Skip escape sequence encoding/decoding for strings |
+| `bool structs_as_arrays` | `false` | Handle structs without keys (as arrays) |
 | `bool validate_skipped` | `false` | Perform full validation on skipped values |
 | `bool validate_trailing_whitespace` | `false` | Validate whitespace after parsing completes |
 | `bool bools_as_numbers` | `false` | Read/write booleans as `1` and `0` |
-| `bool write_member_functions` | `false` | Serialize member function pointers in `glz::meta` (off by default for safety) |
+| `bool write_function_pointers` | `false` | Serialize function pointers (both member and non-member) in `glz::meta` as their type name (off by default) |
 | `bool concatenate` | `true` | Concatenate ranges of `std::pair` into single objects |
 | `bool allow_conversions` | `true` | Allow type conversions in BEVE (e.g., `double` → `float`) |
 | `bool write_type_info` | `true` | Write type info for meta objects in variants |
@@ -50,6 +47,9 @@ These options are **not** in `glz::opts` by default. Add them to a custom option
 | `bool error_on_const_read` | `false` | Error when attempting to read into a const value |
 | `bool hide_non_invocable` | `true` | Hide non-invocable members from `cli_menu` |
 | `bool escape_control_characters` | `false` | Escape control characters as unicode sequences |
+| `char indentation_char` | `' '` | Prettified JSON indentation character |
+| `uint8_t indentation_width` | `3` | Prettified JSON indentation size |
+| `bool new_lines_in_arrays` | `true` | Whether prettified arrays have new lines per element |
 | `float_precision float_max_write_precision` | `full` | Maximum precision for writing floats |
 | `static constexpr std::string_view float_format` | (none) | Format string for float output using `std::format` (C++23) |
 | `bool skip_null_members_on_read` | `false` | Skip null values when reading (preserve existing value) |
@@ -197,14 +197,27 @@ When `true` (default), null values are omitted from JSON output. This applies to
 #### `prettify`
 When `true`, outputs formatted JSON with indentation and newlines.
 
-#### `indentation_char` / `indentation_width`
-Control prettified output formatting. Default is 3 spaces per level.
+#### `indentation_char` / `indentation_width` (Inheritable)
+Control prettified output formatting. Default is 3 spaces per level. These are inheritable options—define them in a custom opts struct:
+```cpp
+struct my_opts : glz::opts {
+   char indentation_char = '\t';  // use tabs
+   uint8_t indentation_width = 1; // one tab per level
+};
+glz::write<my_opts{.prettify = true}>(obj, json);
+```
 
-#### `new_lines_in_arrays`
-When `true` (default), prettified arrays have each element on its own line.
+#### `new_lines_in_arrays` (Inheritable)
+When `true` (default), prettified arrays have each element on its own line. Set to `false` for compact array output:
+```cpp
+struct compact_arrays : glz::opts {
+   bool new_lines_in_arrays = false;
+};
+glz::write<compact_arrays{.prettify = true}>(obj, json);
+```
 
-#### `raw` / `raw_string`
-Control string quoting and escape sequence handling. Useful for embedding pre-formatted content.
+#### `unquoted` / `raw_string` (Inheritable)
+Control string quoting and escape sequence handling. Useful for embedding pre-formatted content. See [Type Handling Options](#type-handling-options) for details.
 
 #### `escape_control_characters`
 When `true`, control characters (0x00-0x1F) are escaped as `\uXXXX` sequences. The default (`false`) does not escape these characters for performance and safety (embedding nulls can cause issues, especially with C APIs). Glaze will error when parsing non-escaped control characters per the JSON spec—this option allows writing them as escaped unicode to avoid such errors on re-read.
@@ -266,16 +279,37 @@ For objects with few fields, the performance difference is negligible. For objec
 
 ### Type Handling Options
 
-#### `quoted_num`
-Treats numbers as quoted strings (e.g., `"123"` instead of `123`).
+#### `quoted_num` (Inheritable)
+Treats numbers as quoted strings (e.g., `"123"` instead of `123`). Add to a custom options struct:
+```cpp
+struct my_opts : glz::opts { bool quoted_num = true; };
+```
 
-#### `number`
-Treats string-like types as unquoted numbers.
+#### `string_as_number` (Inheritable)
+Treats string-like types as unquoted numbers. Add to a custom options struct:
+```cpp
+struct my_opts : glz::opts { bool string_as_number = true; };
+```
 
-#### `structs_as_arrays`
-Serializes/deserializes structs as JSON arrays (without keys), using field order.
+#### `unquoted` (Inheritable)
+Writes string-like values without surrounding quotes. Add to a custom options struct:
+```cpp
+struct my_opts : glz::opts { bool unquoted = true; };
+```
 
-#### `bools_as_numbers`
+#### `raw_string` (Inheritable)
+Skips escape sequence encoding/decoding for strings. Add to a custom options struct:
+```cpp
+struct my_opts : glz::opts { bool raw_string = true; };
+```
+
+#### `structs_as_arrays` (Inheritable)
+Serializes/deserializes structs as JSON arrays (without keys), using field order. Add to a custom options struct:
+```cpp
+struct my_opts : glz::opts { bool structs_as_arrays = true; };
+```
+
+#### `bools_as_numbers` (Inheritable)
 Reads/writes boolean values as `1` and `0` instead of `true` and `false`.
 
 #### `write_type_info`

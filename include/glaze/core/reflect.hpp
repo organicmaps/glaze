@@ -376,20 +376,20 @@ namespace glz
          }
          else if constexpr (Opts.skip_null_members) {
             // if any type could be null then we might skip
-            constexpr bool write_member_functions = check_write_member_functions(Opts);
+            constexpr bool write_function_pointers = check_write_function_pointers(Opts);
             return [&]<size_t... I>(std::index_sequence<I...>) {
                return ((always_skipped<field_t<T, I>> ||
-                        (!write_member_functions && is_member_function_pointer<field_t<T, I>>) ||
+                        (!write_function_pointers && is_member_function_pointer<field_t<T, I>>) ||
                         null_t<field_t<T, I>>) ||
                        ...);
             }(std::make_index_sequence<N>{});
          }
          else {
             // if we have an always_skipped type then we return true
-            constexpr bool write_member_functions = check_write_member_functions(Opts);
+            constexpr bool write_function_pointers = check_write_function_pointers(Opts);
             return [&]<size_t... I>(std::index_sequence<I...>) {
                return ((always_skipped<field_t<T, I>> ||
-                        (!write_member_functions && is_member_function_pointer<field_t<T, I>>)) ||
+                        (!write_function_pointers && is_member_function_pointer<field_t<T, I>>)) ||
                        ...);
             }(std::make_index_sequence<N>{});
          }
@@ -470,6 +470,15 @@ namespace glz
       if constexpr (Opts.error_on_missing_keys) {
          for_each<N>([&]<auto I>() constexpr {
             using V = std::decay_t<refl_t<T, I>>;
+
+            // Check if field is skipped during parse - if so, don't require it
+            if constexpr (meta_has_skip<T>) {
+               constexpr auto key = reflect<T>::keys[I];
+               if constexpr (meta<T>::skip(key, {operation::parse})) {
+                  fields[I] = false;
+                  return;
+               }
+            }
 
             // Check if meta<T>::requires_key customization point exists
             if constexpr (meta_has_requires_key<T>) {
@@ -632,20 +641,27 @@ namespace glz
    enum struct int_hash_type {
       direct, // Sequential values starting at 0: value as index
       offset, // Sequential values with offset: value - min_value
+      two_element, // N==2: compare against first value
       power_of_two, // Powers of 2 (flags): countr_zero(value)
       small_range, // Sparse lookup table for small ranges
-      modular // Perfect hash: (value * seed) % table_size
+      modular, // Perfect hash: (value * seed) % table_size
+      modular_shifted, // Perfect hash with shift: ((value >> shift) * seed) % table_size
+      linear_search, // Fallback: linear scan through values (N <= 16)
+      binary_search // Fallback: binary search through sorted values (N > 16)
    };
 
    template <size_t N, size_t TableSize>
    struct int_keys_info_t
    {
+      // Note: table must be first to work around Apple clang NTTP bug where
+      // arrays at the end of structs get corrupted when passed as template parameters
+      std::array<uint8_t, TableSize> table{}; // For small_range/modular: maps key → index
       int_hash_type type{};
       int64_t min_value{};
       int64_t max_value{};
       uint64_t seed{};
       size_t table_size{};
-      std::array<uint8_t, TableSize> table{}; // For small_range/modular: maps key → index
+      uint8_t shift{}; // Right shift to apply before modular hash (handles common power-of-2 factors)
    };
 
    // Specialization for when no table is needed
@@ -657,6 +673,7 @@ namespace glz
       int64_t max_value{};
       uint64_t seed{};
       size_t table_size{};
+      uint8_t shift{}; // Right shift to apply before modular hash (handles common power-of-2 factors)
    };
 
    template <class T>
@@ -678,6 +695,13 @@ namespace glz
          else {
             return int_keys_info_t<1, 0>{.type = int_hash_type::offset, .min_value = static_cast<int64_t>(value)};
          }
+      }
+      else if constexpr (N == 2) {
+         // For two-element enums, compare against first value
+         constexpr auto first_value = static_cast<int64_t>(static_cast<U>(glz::get<0>(reflect<T>::values)));
+         constexpr auto second_value = static_cast<int64_t>(static_cast<U>(glz::get<1>(reflect<T>::values)));
+         return int_keys_info_t<2, 0>{
+            .type = int_hash_type::two_element, .min_value = first_value, .max_value = second_value};
       }
       else {
          // Extract values into array for analysis
@@ -776,6 +800,7 @@ namespace glz
          }
          else {
             // Strategy 4: Modular perfect hash (fallback)
+            // First try standard modular hash (faster lookup)
             constexpr auto modular_info = [&]() {
                for (const auto prime : primes_64) {
                   std::array<bool, table_size> used{};
@@ -797,17 +822,79 @@ namespace glz
                return std::pair{false, uint64_t{0}};
             }();
 
-            static_assert(modular_info.first, "Failed to find perfect hash seed for enum");
+            if constexpr (modular_info.first) {
+               // Standard modular hash works
+               int_keys_info_t<N, table_size> info{
+                  .type = int_hash_type::modular, .seed = modular_info.second, .table_size = table_size};
+               info.table.fill(static_cast<uint8_t>(N));
 
-            int_keys_info_t<N, table_size> info{
-               .type = int_hash_type::modular, .seed = modular_info.second, .table_size = table_size};
-            info.table.fill(static_cast<uint8_t>(N));
-
-            for (size_t i = 0; i < N; ++i) {
-               const auto h = (static_cast<uint64_t>(vals[i]) * info.seed) % table_size;
-               info.table[h] = static_cast<uint8_t>(i);
+               for (size_t i = 0; i < N; ++i) {
+                  const auto h = (static_cast<uint64_t>(vals[i]) * info.seed) % table_size;
+                  info.table[h] = static_cast<uint8_t>(i);
+               }
+               return info;
             }
-            return info;
+            else {
+               // Strategy 5: Modular hash with shift for sparse enums with common power-of-2 factors
+               constexpr uint8_t common_shift = [&]() -> uint8_t {
+                  uint8_t min_trailing = 64;
+                  for (const auto v : vals) {
+                     if (v != 0) {
+                        const auto trailing = static_cast<uint8_t>(std::countr_zero(static_cast<uint64_t>(v)));
+                        if (trailing < min_trailing) {
+                           min_trailing = trailing;
+                        }
+                     }
+                  }
+                  return min_trailing == 64 ? 0 : min_trailing;
+               }();
+
+               constexpr auto shifted_info = [&]() {
+                  for (const auto prime : primes_64) {
+                     std::array<bool, table_size> used{};
+                     bool collision = false;
+
+                     for (size_t i = 0; i < N; ++i) {
+                        const auto shifted = static_cast<uint64_t>(vals[i]) >> common_shift;
+                        const auto h = (shifted * prime) % table_size;
+                        if (used[h]) {
+                           collision = true;
+                           break;
+                        }
+                        used[h] = true;
+                     }
+
+                     if (!collision) {
+                        return std::pair{true, prime};
+                     }
+                  }
+                  return std::pair{false, uint64_t{0}};
+               }();
+
+               if constexpr (shifted_info.first) {
+                  int_keys_info_t<N, table_size> info{.type = int_hash_type::modular_shifted,
+                                                      .seed = shifted_info.second,
+                                                      .table_size = table_size,
+                                                      .shift = common_shift};
+                  info.table.fill(static_cast<uint8_t>(N));
+
+                  for (size_t i = 0; i < N; ++i) {
+                     const auto shifted = static_cast<uint64_t>(vals[i]) >> common_shift;
+                     const auto h = (shifted * info.seed) % table_size;
+                     info.table[h] = static_cast<uint8_t>(i);
+                  }
+                  return info;
+               }
+               else {
+                  // Fallback: linear search for small N, binary search for larger N
+                  if constexpr (N <= 16) {
+                     return int_keys_info_t<N, 0>{.type = int_hash_type::linear_search};
+                  }
+                  else {
+                     return int_keys_info_t<N, 0>{.type = int_hash_type::binary_search};
+                  }
+               }
+            }
          }
       }
    }
@@ -841,6 +928,17 @@ namespace glz
          else if constexpr (Info.type == offset) {
             return static_cast<size_t>(value - Info.min_value);
          }
+         else if constexpr (Info.type == two_element) {
+            // Compare against first value: if match return 0, else check second
+            // Use uint64_t to handle both signed and unsigned underlying types correctly
+            if (static_cast<uint64_t>(value) == static_cast<uint64_t>(Info.min_value)) {
+               return 0;
+            }
+            else if (static_cast<uint64_t>(value) == static_cast<uint64_t>(Info.max_value)) {
+               return 1;
+            }
+            return N; // Not found
+         }
          else if constexpr (Info.type == power_of_two) {
             using UnsignedU = std::make_unsigned_t<U>;
             const auto uv = static_cast<UnsignedU>(value);
@@ -861,9 +959,77 @@ namespace glz
             }
             return Info.table[static_cast<size_t>(idx)]; // Returns N if slot is empty
          }
-         else { // modular
+         else if constexpr (Info.type == modular) {
             const auto h = (static_cast<uint64_t>(value) * Info.seed) % Info.table_size;
             return Info.table[h]; // Returns N if slot is empty
+         }
+         else if constexpr (Info.type == modular_shifted) {
+            const auto shifted = static_cast<uint64_t>(value) >> Info.shift;
+            const auto h = (shifted * Info.seed) % Info.table_size;
+            return Info.table[h]; // Returns N if slot is empty
+         }
+         else if constexpr (Info.type == linear_search) {
+            // Linear scan through enum values
+            constexpr auto& values = enum_values_array<T>;
+            for (size_t i = 0; i < N; ++i) {
+               if (values[i] == value) {
+                  return i;
+               }
+            }
+            return N; // Not found
+         }
+         else { // binary_search
+            // Binary search through sorted enum values
+            // Compute sorted indices and values together to avoid capture issues
+            constexpr auto sorted_data = []() {
+               struct result_t
+               {
+                  std::array<size_t, N> indices{};
+                  std::array<U, N> values{};
+               };
+               result_t result{};
+
+               // Initialize indices
+               for (size_t i = 0; i < N; ++i) {
+                  result.indices[i] = i;
+               }
+
+               // Sort indices by their corresponding values (bubble sort for constexpr)
+               constexpr auto& src_values = enum_values_array<T>;
+               for (size_t i = 0; i < N - 1; ++i) {
+                  for (size_t j = i + 1; j < N; ++j) {
+                     if (src_values[result.indices[j]] < src_values[result.indices[i]]) {
+                        auto tmp = result.indices[i];
+                        result.indices[i] = result.indices[j];
+                        result.indices[j] = tmp;
+                     }
+                  }
+               }
+
+               // Build sorted values array
+               for (size_t i = 0; i < N; ++i) {
+                  result.values[i] = src_values[result.indices[i]];
+               }
+
+               return result;
+            }();
+
+            // Binary search
+            size_t left = 0;
+            size_t right = N;
+            while (left < right) {
+               const size_t mid = left + (right - left) / 2;
+               if (sorted_data.values[mid] < value) {
+                  left = mid + 1;
+               }
+               else {
+                  right = mid;
+               }
+            }
+            if (left < N && sorted_data.values[left] == value) {
+               return sorted_data.indices[left];
+            }
+            return N; // Not found
          }
       }
    };
@@ -2140,8 +2306,9 @@ namespace glz
 
       GLZ_ALWAYS_INLINE static constexpr size_t op(auto&& it, auto end) noexcept
       {
-         // For JSON we require at a minimum ":1} characters after a key (1 being a single char number)
-         // This means that we can require all these characters to exist for SWAR parsing
+         // Bounds checks ensure we can safely read the string content and determine its length.
+         // Note: This is used for both object keys and enum values, so we cannot assume
+         // extra characters exist after the closing quote (e.g., standalone enum: "value")
 
          if constexpr (length_range == 0) {
             if ((it + min_length) >= end) [[unlikely]] {
@@ -2153,7 +2320,9 @@ namespace glz
          else {
             if constexpr (length_range == 1) {
                auto quote = it + min_length;
-               if ((quote + 1) >= end) [[unlikely]] {
+               // Ensure we can read *quote to determine if string is min_length or max_length.
+               // The check (quote + 1) > end ensures quote < end, making *quote dereferenceable.
+               if ((quote + 1) > end) [[unlikely]] {
                   return N;
                }
 
@@ -2392,7 +2561,6 @@ namespace glz
 
       if constexpr (K > 0) {
          using keys_t = keys_wrapper<variant_deduction_keys<T>>;
-         constexpr auto& HashInfo = hash_info<keys_t>;
 
          // Populate bit arrays - for each key, set bits for variant types that have it
          for_each<std::variant_size_v<T>>([&]<auto I>() {
@@ -2401,6 +2569,7 @@ namespace glz
                using X = std::conditional_t<is_memory_object<V>, memory_type<V>, V>;
                constexpr auto Size = reflect<X>::size;
                if constexpr (Size > 0) {
+                  constexpr auto& HashInfo = hash_info<keys_t>;
                   for (size_t J = 0; J < Size; ++J) {
                      sv key = reflect<X>::keys[J];
                      const auto index = decode_hash_with_size<JSON, keys_t, HashInfo, HashInfo.type>::op(
@@ -2441,6 +2610,13 @@ namespace glz
          else {
             return int_keys_info_t<1, 0>{.type = int_hash_type::offset, .min_value = static_cast<int64_t>(value)};
          }
+      }
+      else if constexpr (N == 2) {
+         // For two-element IDs, compare against first value
+         constexpr auto first_value = static_cast<int64_t>(ids_v<T>[0]);
+         constexpr auto second_value = static_cast<int64_t>(ids_v<T>[1]);
+         return int_keys_info_t<2, 0>{
+            .type = int_hash_type::two_element, .min_value = first_value, .max_value = second_value};
       }
       else {
          // Extract values from ids_v<T>
@@ -2537,6 +2713,8 @@ namespace glz
             return info;
          }
          else {
+            // Strategy 4: Modular perfect hash (fallback)
+            // First try standard modular hash (faster lookup)
             constexpr auto modular_info = [&]() {
                for (const auto prime : primes_64) {
                   std::array<bool, table_size> used{};
@@ -2558,17 +2736,79 @@ namespace glz
                return std::pair{false, uint64_t{0}};
             }();
 
-            static_assert(modular_info.first, "Failed to find perfect hash seed for variant int IDs");
+            if constexpr (modular_info.first) {
+               // Standard modular hash works
+               int_keys_info_t<N, table_size> info{
+                  .type = int_hash_type::modular, .seed = modular_info.second, .table_size = table_size};
+               info.table.fill(static_cast<uint8_t>(N));
 
-            int_keys_info_t<N, table_size> info{
-               .type = int_hash_type::modular, .seed = modular_info.second, .table_size = table_size};
-            info.table.fill(static_cast<uint8_t>(N));
-
-            for (size_t i = 0; i < N; ++i) {
-               const auto h = (static_cast<uint64_t>(vals[i]) * info.seed) % table_size;
-               info.table[h] = static_cast<uint8_t>(i);
+               for (size_t i = 0; i < N; ++i) {
+                  const auto h = (static_cast<uint64_t>(vals[i]) * info.seed) % table_size;
+                  info.table[h] = static_cast<uint8_t>(i);
+               }
+               return info;
             }
-            return info;
+            else {
+               // Strategy 5: Modular hash with shift for sparse values with common power-of-2 factors
+               constexpr uint8_t common_shift = [&]() -> uint8_t {
+                  uint8_t min_trailing = 64;
+                  for (const auto v : vals) {
+                     if (v != 0) {
+                        const auto trailing = static_cast<uint8_t>(std::countr_zero(static_cast<uint64_t>(v)));
+                        if (trailing < min_trailing) {
+                           min_trailing = trailing;
+                        }
+                     }
+                  }
+                  return min_trailing == 64 ? 0 : min_trailing;
+               }();
+
+               constexpr auto shifted_info = [&]() {
+                  for (const auto prime : primes_64) {
+                     std::array<bool, table_size> used{};
+                     bool collision = false;
+
+                     for (size_t i = 0; i < N; ++i) {
+                        const auto shifted = static_cast<uint64_t>(vals[i]) >> common_shift;
+                        const auto h = (shifted * prime) % table_size;
+                        if (used[h]) {
+                           collision = true;
+                           break;
+                        }
+                        used[h] = true;
+                     }
+
+                     if (!collision) {
+                        return std::pair{true, prime};
+                     }
+                  }
+                  return std::pair{false, uint64_t{0}};
+               }();
+
+               if constexpr (shifted_info.first) {
+                  int_keys_info_t<N, table_size> info{.type = int_hash_type::modular_shifted,
+                                                      .seed = shifted_info.second,
+                                                      .table_size = table_size,
+                                                      .shift = common_shift};
+                  info.table.fill(static_cast<uint8_t>(N));
+
+                  for (size_t i = 0; i < N; ++i) {
+                     const auto shifted = static_cast<uint64_t>(vals[i]) >> common_shift;
+                     const auto h = (shifted * info.seed) % table_size;
+                     info.table[h] = static_cast<uint8_t>(i);
+                  }
+                  return info;
+               }
+               else {
+                  // Fallback: linear search for small N, binary search for larger N
+                  if constexpr (N <= 16) {
+                     return int_keys_info_t<N, 0>{.type = int_hash_type::linear_search};
+                  }
+                  else {
+                     return int_keys_info_t<N, 0>{.type = int_hash_type::binary_search};
+                  }
+               }
+            }
          }
       }
    }
@@ -2617,6 +2857,17 @@ namespace glz
          else if constexpr (Info.type == offset) {
             return static_cast<size_t>(id - Info.min_value);
          }
+         else if constexpr (Info.type == two_element) {
+            // Compare against first value: if match return 0, else check second
+            // Use uint64_t to handle both signed and unsigned underlying types correctly
+            if (static_cast<uint64_t>(id) == static_cast<uint64_t>(Info.min_value)) {
+               return 0;
+            }
+            else if (static_cast<uint64_t>(id) == static_cast<uint64_t>(Info.max_value)) {
+               return 1;
+            }
+            return N; // Not found
+         }
          else if constexpr (Info.type == power_of_two) {
             using UnsignedU = std::make_unsigned_t<U>;
             const auto uv = static_cast<UnsignedU>(id);
@@ -2636,9 +2887,65 @@ namespace glz
             }
             return Info.table[static_cast<size_t>(idx)];
          }
-         else { // modular
+         else if constexpr (Info.type == modular) {
             const auto h = (static_cast<uint64_t>(id) * Info.seed) % Info.table_size;
             return Info.table[h];
+         }
+         else if constexpr (Info.type == modular_shifted) {
+            const auto shifted = static_cast<uint64_t>(id) >> Info.shift;
+            const auto h = (shifted * Info.seed) % Info.table_size;
+            return Info.table[h];
+         }
+         else if constexpr (Info.type == linear_search) {
+            for (size_t i = 0; i < N; ++i) {
+               if (ids_v<T>[i] == id) {
+                  return i;
+               }
+            }
+            return N;
+         }
+         else { // binary_search
+            constexpr auto sorted_data = []() {
+               struct result_t
+               {
+                  std::array<size_t, N> indices{};
+                  std::array<U, N> values{};
+               };
+               result_t result{};
+
+               for (size_t i = 0; i < N; ++i) {
+                  result.indices[i] = i;
+               }
+               for (size_t i = 0; i < N - 1; ++i) {
+                  for (size_t j = i + 1; j < N; ++j) {
+                     if (ids_v<T>[result.indices[j]] < ids_v<T>[result.indices[i]]) {
+                        auto tmp = result.indices[i];
+                        result.indices[i] = result.indices[j];
+                        result.indices[j] = tmp;
+                     }
+                  }
+               }
+               for (size_t i = 0; i < N; ++i) {
+                  result.values[i] = ids_v<T>[result.indices[i]];
+               }
+               return result;
+            }();
+
+            size_t left = 0;
+            size_t right = N;
+            while (left < right) {
+               const size_t mid = left + (right - left) / 2;
+               if (sorted_data.values[mid] < id) {
+                  left = mid + 1;
+               }
+               else {
+                  right = mid;
+               }
+            }
+            if (left < N && sorted_data.values[left] == id) {
+               return sorted_data.indices[left];
+            }
+            return N;
          }
       }
    };

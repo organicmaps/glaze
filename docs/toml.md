@@ -78,6 +78,197 @@ retry.backoff_ms = 500
 
 Glaze understands standard TOML number formats (binary, octal, hex), quoted and multiline strings, arrays, inline tables, and comments (`#`).
 
+## Array of Tables
+
+Glaze supports TOML's array-of-tables syntax (`[[array_name]]`) for serializing and deserializing `std::vector` of objects. This provides a clean, readable format for arrays of structured data.
+
+### Basic Array of Tables
+
+```cpp
+struct product
+{
+   std::string name;
+   int sku;
+};
+
+template <>
+struct glz::meta<product>
+{
+   using T = product;
+   static constexpr auto value = object(&T::name, &T::sku);
+};
+
+struct catalog
+{
+   std::string store_name;
+   std::vector<product> products;
+};
+
+template <>
+struct glz::meta<catalog>
+{
+   using T = catalog;
+   static constexpr auto value = object(&T::store_name, &T::products);
+};
+
+catalog c{
+   "Hardware Store",
+   {{"Hammer", 738594937}, {"Nail", 284758393}}
+};
+
+std::string toml{};
+glz::write_toml(c, toml);
+```
+
+Output:
+
+```toml
+store_name = "Hardware Store"
+[[products]]
+name = "Hammer"
+sku = 738594937
+
+[[products]]
+name = "Nail"
+sku = 284758393
+```
+
+### Nested Array of Tables
+
+Glaze produces TOML-spec-compliant output for nested arrays using dotted paths (`[[parent.child]]`):
+
+```cpp
+struct variety
+{
+   std::string name;
+};
+
+struct fruit
+{
+   std::string name;
+   std::vector<variety> varieties;
+};
+
+struct fruit_basket
+{
+   std::vector<fruit> fruits;
+};
+
+fruit_basket basket{
+   {{"apple", {{"red delicious"}, {"granny smith"}}},
+    {"banana", {{"cavendish"}}}}
+};
+
+std::string toml{};
+glz::write_toml(basket, toml);
+```
+
+Output:
+
+```toml
+[[fruits]]
+name = "apple"
+[[fruits.varieties]]
+name = "red delicious"
+
+[[fruits.varieties]]
+name = "granny smith"
+
+[[fruits]]
+name = "banana"
+[[fruits.varieties]]
+name = "cavendish"
+```
+
+### Reading Array of Tables
+
+Glaze reads array-of-tables syntax correctly, including:
+- Multiple `[[name]]` sections that append to the same array
+- Empty table entries (`[[name]]` followed immediately by another `[[name]]`)
+- Nested dotted paths like `[[parent.child]]`
+
+```cpp
+std::string input = R"(
+[[products]]
+name = "Hammer"
+sku = 738594937
+
+[[products]]
+
+[[products]]
+name = "Nail"
+sku = 284758393
+)";
+
+catalog c{};
+glz::read_toml(c, input);
+// c.products.size() == 3 (second entry is empty/default)
+```
+
+### Write Ordering
+
+Glaze writes TOML in spec-compliant order: scalar key-value pairs appear before tables and array-of-tables sections. This ensures the output is valid TOML that can be parsed by any compliant reader.
+
+### Inline Tables
+
+By default, `std::vector` of objects uses array-of-tables (`[[name]]`) syntax. There are two ways to use inline table syntax (`[{...}, {...}]`) instead:
+
+#### Global Option: `glz::toml_opts`
+
+Use `glz::toml_opts` with the standard `write<>` interface to write all arrays of objects using inline syntax:
+
+```cpp
+struct product
+{
+   std::string name;
+   int sku;
+};
+
+struct catalog
+{
+   std::string store_name;
+   std::vector<product> products;
+};
+
+catalog c{"My Store", {{"Widget", 100}, {"Gadget", 200}}};
+std::string toml{};
+glz::write<glz::toml_opts{true}>(c, toml);  // inline_arrays = true
+```
+
+Output:
+
+```toml
+store_name = "My Store"
+products = [{name = "Widget", sku = 100}, {name = "Gadget", sku = 200}]
+```
+
+The `glz::toml_opts` struct inherits from `glz::opts`, following the recommended pattern for format-specific options. For repeated use, create a named constant:
+
+```cpp
+constexpr glz::toml_opts inline_toml{true};
+glz::write<inline_toml>(c, toml);
+```
+
+#### Per-Field Option: `glz::inline_table` Wrapper
+
+For fine-grained control, use the `glz::inline_table` wrapper in your `glz::meta` definition to specify which fields use inline syntax:
+
+```cpp
+template <>
+struct glz::meta<catalog>
+{
+   using T = catalog;
+   // Use inline_table wrapper for this specific field
+   static constexpr auto value = object(&T::store_name, "products", glz::inline_table<&T::products>);
+};
+
+catalog c{"My Store", {{"Widget", 100}, {"Gadget", 200}}};
+std::string toml{};
+glz::write_toml(c, toml);  // Regular write_toml, but products uses inline syntax
+```
+
+This is useful when you want a more compact representation or when the array contains simple objects with few fields.
+
 ## Using the Generic API
 
 The convenience wrappers call into the generic `glz::read`/`glz::write` pipeline. You can reuse the same options struct you already use for JSON while switching the format to TOML:
@@ -311,3 +502,200 @@ glz::read_toml(parsed, toml);  // exact roundtrip
 | `hh_mm_ss<milliseconds>` | Local Time | `10:30:45.123` |
 | `duration<Rep, Period>` | Numeric | `3600` |
 | `steady_clock::time_point` | Numeric | `123456789012345` |
+
+## Variant and Generic Type Support
+
+Glaze supports `std::variant` and the generic JSON types (`glz::generic`, `glz::generic_i64`, `glz::generic_u64`) for TOML serialization and deserialization. This enables schema-less parsing where the structure of the data is not known at compile time.
+
+### std::variant Support
+
+Any `std::variant` can be serialized to TOML. When writing, the currently held alternative is serialized directly:
+
+```cpp
+#include "glaze/toml.hpp"
+
+std::variant<int, double, std::string, bool> value = 42;
+std::string toml = glz::write_toml(value).value();
+// Output: 42
+
+value = "hello";
+toml = glz::write_toml(value).value();
+// Output: "hello"
+
+value = true;
+toml = glz::write_toml(value).value();
+// Output: true
+```
+
+When reading, Glaze automatically detects the TOML value type and selects the appropriate variant alternative:
+
+```cpp
+std::variant<int64_t, double, std::string, bool> value;
+
+glz::read_toml(value, "42");        // value holds int64_t{42}
+glz::read_toml(value, "3.14");      // value holds double{3.14}
+glz::read_toml(value, "\"text\"");  // value holds std::string{"text"}
+glz::read_toml(value, "true");      // value holds bool{true}
+```
+
+### Generic JSON Types
+
+The generic JSON types provide a convenient way to parse arbitrary TOML data:
+
+| Type | Integer Storage | Use Case |
+|------|-----------------|----------|
+| `glz::generic` | `double` | General purpose, preserves floating-point precision |
+| `glz::generic_i64` | `int64_t` | When integers must be preserved exactly |
+| `glz::generic_u64` | `uint64_t` for positive, `int64_t` for negative | When large positive integers are needed |
+
+#### Using glz::generic
+
+```cpp
+#include "glaze/toml.hpp"
+
+glz::generic data;
+std::string input = R"(
+name = "config"
+port = 8080
+rate = 0.5
+enabled = true
+tags = ["web", "api"]
+)";
+
+auto ec = glz::read_toml(data, input);
+
+// Access the parsed data
+auto& obj = std::get<glz::obj>(data);
+auto& name = std::get<std::string>(obj["name"]);   // "config"
+auto& port = std::get<double>(obj["port"]);        // 8080.0
+auto& rate = std::get<double>(obj["rate"]);        // 0.5
+auto& enabled = std::get<bool>(obj["enabled"]);    // true
+auto& tags = std::get<glz::arr>(obj["tags"]);      // ["web", "api"]
+```
+
+#### Using glz::generic_i64
+
+Use `glz::generic_i64` when you need exact integer preservation:
+
+```cpp
+glz::generic_i64 data;
+glz::read_toml(data, "value = 9007199254740993");  // Larger than JS safe integer
+
+auto& obj = std::get<glz::obj_i64>(data);
+auto& value = std::get<int64_t>(obj["value"]);  // Exact: 9007199254740993
+```
+
+#### Using glz::generic_u64
+
+Use `glz::generic_u64` when working with large unsigned integers:
+
+```cpp
+glz::generic_u64 data;
+glz::read_toml(data, "big = 18446744073709551615");  // Max uint64_t
+
+auto& obj = std::get<glz::obj_u64>(data);
+auto& big = std::get<uint64_t>(obj["big"]);  // 18446744073709551615
+```
+
+Negative integers are stored as `int64_t` even in u64 mode:
+
+```cpp
+glz::generic_u64 data;
+glz::read_toml(data, "negative = -42");
+
+auto& obj = std::get<glz::obj_u64>(data);
+auto& negative = std::get<int64_t>(obj["negative"]);  // -42 as int64_t
+```
+
+### Type Detection Rules
+
+When reading into a variant or generic type, Glaze uses these rules to determine the TOML value type:
+
+| TOML Syntax | Detected Type |
+|-------------|---------------|
+| `"..."` or `'...'` | String |
+| `true` or `false` | Boolean |
+| `[...]` | Array |
+| Numbers with `.`, `e`, `E`, `inf`, `nan` | Float |
+| Other numbers | Integer |
+
+For integers in `glz::generic_u64` mode:
+- Numbers starting with `-` are stored as `int64_t`
+- Positive numbers are stored as `uint64_t`
+
+### Writing Generic Types
+
+Generic types can be written back to TOML:
+
+```cpp
+glz::generic_i64 data;
+auto& obj = data.emplace<glz::obj_i64>();
+obj["name"] = "example";
+obj["count"] = int64_t{42};
+obj["enabled"] = true;
+
+std::string toml = glz::write_toml(data).value();
+```
+
+Output:
+
+```toml
+name = "example"
+count = 42
+enabled = true
+```
+
+### Nested Arrays
+
+Nested arrays are supported for reading:
+
+```cpp
+glz::generic data;
+glz::read_toml(data, "[[1, 2], [3, 4], [5, 6]]");
+
+auto& arr = std::get<glz::arr>(data);
+auto& inner = std::get<glz::arr>(arr[0]);
+auto& val = std::get<double>(inner[0]);  // 1.0
+```
+
+### Map Types (std::map, std::unordered_map)
+
+TOML documents can also be read directly into map types like `std::map<std::string, T>` or `std::unordered_map<std::string, T>`:
+
+```cpp
+std::map<std::string, int64_t> config;
+std::string toml = R"(
+port = 8080
+timeout = 30
+retries = 3
+)";
+
+auto ec = glz::read_toml(config, toml);
+// config["port"] == 8080
+// config["timeout"] == 30
+// config["retries"] == 3
+```
+
+This also works with table sections:
+
+```cpp
+std::map<std::string, std::map<std::string, std::string>> config;
+std::string toml = R"(
+[database]
+host = "localhost"
+user = "admin"
+
+[cache]
+driver = "redis"
+)";
+
+auto ec = glz::read_toml(config, toml);
+// config["database"]["host"] == "localhost"
+// config["cache"]["driver"] == "redis"
+```
+
+### Limitations
+
+- **Null values**: TOML has no native null type. When writing `std::nullptr_t` or a variant holding null, an empty string `""` is written.
+- **Type coercion**: The parser does not coerce types. If the variant has no matching alternative for the detected type, an error is returned.
+- **Array of tables in maps**: The `[[array_of_tables]]` syntax is not fully supported when reading into map types. Use struct-based types for this pattern.
