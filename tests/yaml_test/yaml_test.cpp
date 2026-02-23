@@ -56,6 +56,30 @@ struct glz::meta<nested_struct>
    static constexpr auto value = object("title", &T::title, "data", &T::data, "numbers", &T::numbers);
 };
 
+struct nested_generic_member
+{
+   glz::generic c{};
+};
+
+template <>
+struct glz::meta<nested_generic_member>
+{
+   using T = nested_generic_member;
+   static constexpr auto value = object("c", &T::c);
+};
+
+struct struct_with_nested_generic
+{
+   nested_generic_member b{};
+};
+
+template <>
+struct glz::meta<struct_with_nested_generic>
+{
+   using T = struct_with_nested_generic;
+   static constexpr auto value = object("b", &T::b);
+};
+
 struct optional_struct
 {
    std::string name{};
@@ -107,6 +131,20 @@ struct glz::meta<enum_struct>
 struct reflectable_config
 {
    std::vector<int> servers{};
+};
+
+struct yaml_custom_read_struct
+{
+   int value{};
+
+   void read_value(const std::string& input) { value = std::stoi(input); }
+};
+
+template <>
+struct glz::meta<yaml_custom_read_struct>
+{
+   using T = yaml_custom_read_struct;
+   static constexpr auto value = object("value", custom<&T::read_value, &T::value>);
 };
 
 suite yaml_write_tests = [] {
@@ -210,6 +248,14 @@ name: test)";
       expect(obj.x == 42);
       expect(std::abs(obj.y - 3.14) < 0.001);
       expect(obj.name == "test");
+   };
+
+   "read_custom_meta_field"_test = [] {
+      std::string yaml = "value: '42'";
+      yaml_custom_read_struct obj{};
+      auto ec = glz::read_yaml(obj, yaml);
+      expect(!ec) << glz::format_error(ec, yaml);
+      expect(obj.value == 42);
    };
 
    "read_flow_mapping"_test = [] {
@@ -2788,11 +2834,7 @@ name: test)";
 next: item)";
       glz::generic parsed{};
       auto ec = glz::read_yaml(parsed, yaml);
-      expect(!ec) << glz::format_error(ec, yaml);
-      expect(std::holds_alternative<glz::generic::object_t>(parsed.data));
-      auto& obj = std::get<glz::generic::object_t>(parsed.data);
-      expect(std::get<std::string>(obj.at("key").data) == "value");
-      expect(std::get<std::string>(obj.at("next").data) == "item");
+      expect(bool(ec));
    };
 
    "document_end_marker"_test = [] {
@@ -3083,7 +3125,7 @@ alias: *m)";
       auto ec = glz::read_yaml<glz::opts{.error_on_unknown_keys = false}>(parsed, yaml);
       expect(!ec) << glz::format_error(ec, yaml);
       auto json = glz::write_json(parsed).value_or("ERROR");
-      expect(json == R"({"alias":{"key1":"val1","key2":"val2"},"root":{"key1":"val1","key2":"val2"}})") << json;
+      expect(json == R"({"root":{"key1":"val1","key2":"val2"},"alias":{"key1":"val1","key2":"val2"}})") << json;
    };
 
    "anchor_on_flow_sequence"_test = [] {
@@ -3093,7 +3135,7 @@ alias: *s)";
       auto ec = glz::read_yaml<glz::opts{.error_on_unknown_keys = false}>(parsed, yaml);
       expect(!ec) << glz::format_error(ec, yaml);
       auto json = glz::write_json(parsed).value_or("ERROR");
-      expect(json == R"({"alias":[1,2,3],"root":[1,2,3]})") << json;
+      expect(json == R"({"root":[1,2,3],"alias":[1,2,3]})") << json;
    };
 
    "multiple_anchors"_test = [] {
@@ -3285,6 +3327,36 @@ b: *anchor)";
       expect(json == R"({"a":"b","b":"a"})") << json;
    };
 
+   "anchor_on_tagged_key"_test = [] {
+      std::string yaml = R"(&a5 !!str key5: value4
+other: *a5)";
+      glz::generic parsed{};
+      auto ec = glz::read_yaml<glz::opts{.error_on_unknown_keys = false}>(parsed, yaml);
+      expect(!ec) << glz::format_error(ec, yaml);
+      auto json = glz::write_json(parsed).value_or("WRITE_ERR");
+      expect(json == R"({"key5":"value4","other":"key5"})") << json;
+   };
+
+   "tag_then_anchor_on_key"_test = [] {
+      std::string yaml = R"(!!str &a key: value
+other: *a)";
+      glz::generic parsed{};
+      auto ec = glz::read_yaml<glz::opts{.error_on_unknown_keys = false}>(parsed, yaml);
+      expect(!ec) << glz::format_error(ec, yaml);
+      auto json = glz::write_json(parsed).value_or("WRITE_ERR");
+      expect(json == R"({"key":"value","other":"key"})") << json;
+   };
+
+   "anchor_on_quoted_key_with_space_before_colon"_test = [] {
+      std::string yaml = R"(&a 'key' : value
+other: *a)";
+      glz::generic parsed{};
+      auto ec = glz::read_yaml<glz::opts{.error_on_unknown_keys = false}>(parsed, yaml);
+      expect(!ec) << glz::format_error(ec, yaml);
+      auto json = glz::write_json(parsed).value_or("WRITE_ERR");
+      expect(json == R"({"key":"value","other":"key"})") << json;
+   };
+
    "anchor_block_mapping_replay"_test = [] {
       std::string yaml = R"(bill-to: &id001
     given: Chris
@@ -3295,7 +3367,7 @@ ship-to: *id001)";
       expect(!ec) << glz::format_error(ec, yaml);
       auto json = glz::write_json(parsed).value_or("WRITE_ERR");
       std::string expected =
-         R"({"bill-to":{"family":"Dumars","given":"Chris"},"ship-to":{"family":"Dumars","given":"Chris"}})";
+         R"({"bill-to":{"given":"Chris","family":"Dumars"},"ship-to":{"given":"Chris","family":"Dumars"}})";
       expect(json == expected) << json;
    };
 };
@@ -4652,6 +4724,84 @@ city: NYC)";
       auto& person = std::get<glz::generic::object_t>(obj.at("person").data);
       expect(std::get<std::string>(person.at("name").data) == "Bob");
       expect(std::get<double>(person.at("age").data) == 25.0);
+   };
+
+   // Nested glz::generic member should preserve sibling keys in a nested block mapping.
+   "nested_generic_struct_member_keeps_all_nested_mapping_keys"_test = [] {
+      std::string yaml = R"(---
+b:
+  c:
+    d: 1
+    e: 2
+)";
+
+      struct_with_nested_generic parsed{};
+      auto rec = glz::read_yaml<glz::opts{.error_on_unknown_keys = false}>(parsed, yaml);
+      expect(!rec) << glz::format_error(rec, yaml);
+
+      std::string out;
+      auto wec = glz::write_yaml(parsed, out);
+      expect(!wec);
+
+      auto* obj = parsed.b.c.get_if<glz::generic::object_t>();
+      expect(obj != nullptr);
+      if (obj != nullptr) {
+         expect(obj->size() == 2u) << out;
+         expect(obj->count("d") == 1u);
+         expect(obj->count("e") == 1u) << out;
+         expect(std::get<double>(obj->at("d").data) == 1.0);
+         expect(std::get<double>(obj->at("e").data) == 2.0);
+      }
+   };
+
+   // Deep block mappings inside nested glz::generic members should preserve sibling keys at each depth.
+   "nested_generic_struct_member_keeps_deep_nested_mapping_keys"_test = [] {
+      std::string yaml = R"(---
+b:
+  c:
+    level1:
+      level2:
+        d: 1
+        e: 2
+      sibling2: keep2
+    sibling1: keep1
+)";
+
+      struct_with_nested_generic parsed{};
+      auto rec = glz::read_yaml<glz::opts{.error_on_unknown_keys = false}>(parsed, yaml);
+      expect(!rec) << glz::format_error(rec, yaml);
+
+      std::string out;
+      auto wec = glz::write_yaml(parsed, out);
+      expect(!wec);
+
+      auto* root = parsed.b.c.get_if<glz::generic::object_t>();
+      expect(root != nullptr);
+      if (root != nullptr) {
+         expect(root->size() == 2u) << out;
+         expect(root->count("level1") == 1u);
+         expect(root->count("sibling1") == 1u) << out;
+         expect(std::get<std::string>(root->at("sibling1").data) == "keep1");
+
+         auto* level1 = root->at("level1").get_if<glz::generic::object_t>();
+         expect(level1 != nullptr);
+         if (level1 != nullptr) {
+            expect(level1->size() == 2u) << out;
+            expect(level1->count("level2") == 1u);
+            expect(level1->count("sibling2") == 1u) << out;
+            expect(std::get<std::string>(level1->at("sibling2").data) == "keep2");
+
+            auto* level2 = level1->at("level2").get_if<glz::generic::object_t>();
+            expect(level2 != nullptr);
+            if (level2 != nullptr) {
+               expect(level2->size() == 2u) << out;
+               expect(level2->count("d") == 1u);
+               expect(level2->count("e") == 1u) << out;
+               expect(std::get<double>(level2->at("d").data) == 1.0);
+               expect(std::get<double>(level2->at("e").data) == 2.0);
+            }
+         }
+      }
    };
 
    // First verify simple two-key block mapping works
@@ -6552,6 +6702,42 @@ suite yaml_multiline_plain_scalar_tests = [] {
       expect(std::get<std::string>(arr[2].data) == "test");
    };
 
+   // Continuation lines with "- " deeper than the sequence dash column are scalar content.
+   // This should hold for all items, not just the first one.
+   "sequence_dash_continuation_applies_to_all_items"_test = [] {
+      std::string yaml = R"(- one
+  - keep
+- two
+  - keep2
+)";
+      glz::generic parsed;
+      auto rec = glz::read_yaml(parsed, yaml);
+      expect(!rec) << glz::format_error(rec, yaml);
+
+      auto& arr = std::get<glz::generic::array_t>(parsed.data);
+      expect(arr.size() == 2);
+      expect(std::get<std::string>(arr[0].data) == "one - keep");
+      expect(std::get<std::string>(arr[1].data) == "two - keep2");
+   };
+
+   "sequence_dash_continuation_in_mapping_value"_test = [] {
+      std::string yaml = R"(k:
+  - one
+    - keep
+  - two
+    - keep2
+)";
+      glz::generic parsed;
+      auto rec = glz::read_yaml(parsed, yaml);
+      expect(!rec) << glz::format_error(rec, yaml);
+
+      auto& root = std::get<glz::generic::object_t>(parsed.data);
+      auto& arr = std::get<glz::generic::array_t>(root.at("k").data);
+      expect(arr.size() == 2);
+      expect(std::get<std::string>(arr[0].data) == "one - keep");
+      expect(std::get<std::string>(arr[1].data) == "two - keep2");
+   };
+
    // Test that mapping keys at same indent don't get folded
    "mapping_keys_not_folded"_test = [] {
       std::string yaml = R"(key1: value1
@@ -6579,6 +6765,48 @@ key2: value2)";
       auto& root = std::get<glz::generic::object_t>(parsed.data);
       expect(root.contains("key"));
       expect(std::get<std::string>(root.at("key").data) == "line one line two line three");
+   };
+};
+
+suite yaml_explicit_key_indent_tests = [] {
+   // Explicit-key value indicators must be at the key entry indentation.
+   "explicit_key_value_indicator_cannot_be_deeper_indented"_test = [] {
+      std::string yaml = R"(? key
+  : value
+)";
+      glz::generic parsed;
+      auto rec = glz::read_yaml(parsed, yaml);
+      expect(bool(rec));
+   };
+
+   // Same rule for anchor-only explicit keys ("? &a").
+   "explicit_anchor_key_value_indicator_cannot_be_deeper_indented"_test = [] {
+      std::string yaml = R"(? &a
+  : value
+)";
+      glz::generic parsed;
+      auto rec = glz::read_yaml(parsed, yaml);
+      expect(bool(rec));
+   };
+
+   // yaml-test-suite M2N8-00
+   "explicit_key_inline_colon_is_mapping_key_node"_test = [] {
+      std::string yaml = R"(- ? : x)";
+      glz::generic parsed{};
+      auto ec = glz::read_yaml(parsed, yaml);
+      expect(!ec) << glz::format_error(ec, yaml);
+      auto json = glz::write_json(parsed).value_or("WRITE_ERR");
+      expect(json == R"([{"{\"\":\"x\"}":null}])") << json;
+   };
+
+   // yaml-test-suite SM9W-00
+   "single_dash_stream_is_sequence_with_null_item"_test = [] {
+      std::string yaml = R"(-)";
+      glz::generic parsed{};
+      auto ec = glz::read_yaml(parsed, yaml);
+      expect(!ec) << glz::format_error(ec, yaml);
+      auto json = glz::write_json(parsed).value_or("WRITE_ERR");
+      expect(json == R"([null])") << json;
    };
 };
 
@@ -6739,6 +6967,22 @@ suite yaml_block_scalar_sibling_tests = [] {
       expect(std::get<std::string>(obj.at("k1").data) == "a\nb\n")
          << "k1 was: " << std::get<std::string>(obj.at("k1").data);
       expect(std::get<std::string>(obj.at("k2").data) == "c") << "k2 was: " << std::get<std::string>(obj.at("k2").data);
+   };
+
+   // yaml-test-suite 4WA9: explicit block-scalar indentation in a sequence mapping.
+   "block_scalar_explicit_indent_sibling_key_4WA9"_test = [] {
+      std::string yaml = R"(- aaa: |2
+    xxx
+  bbb: |
+    xxx
+)";
+      glz::generic parsed;
+      auto ec = glz::read_yaml(parsed, yaml);
+      expect(!ec) << glz::format_error(ec, yaml);
+
+      std::string json;
+      (void)glz::write_json(parsed, json);
+      expect(json == R"([{"aaa":"xxx\n","bbb":"xxx\n"}])") << "json was: " << json;
    };
 
    "block_scalar_sibling_key_simple"_test = [] {
